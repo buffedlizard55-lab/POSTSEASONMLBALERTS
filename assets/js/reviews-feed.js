@@ -556,7 +556,7 @@ function gameTeamsLabel(game, teamsById) {
 }
 
 /**
- * Whether a review should trigger the audio alert (gentle raindrop chime).
+ * Whether a review should trigger the audio alert (cha-ching cash register sound).
  * POSTSEASON BUILD — requirement: EVERY tracked category alerts, ABS pitch
  * challenges (typeKey 'abs') INCLUDED. That covers challenges, reviews,
  * boundary calls, official-scorer pending rulings, official scoring changes
@@ -648,7 +648,7 @@ function runsRemovableFromReview(review) {
  * every review type — manager challenge, crew chief/umpire review, boundary
  * call, "under review" status entry, ABS — is eligible.
  *
- * Both alerts play the same raindrop chime; what this gate additionally drives
+ * Both alerts play the same cha-ching cash register sound; what this gate additionally drives
  * is the banner, row badge, stat, filter tab and desktop notification.
  */
 function shouldRunRiskAlert(review) {
@@ -2189,7 +2189,7 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
     }
   }
 
-  // --- Audio alert state (gentle raindrop chime for every tracked category —
+  // --- Audio alert state (cha-ching cash register sound for every tracked category —
   // challenges/reviews/boundary, scoring changes, ABS included) ---
   let isFirstLoad = true;
   let pendingAlertableCount = 0;
@@ -2198,7 +2198,7 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
   let lastAlertAt = 0;
 
   // --- Run-at-risk state (a run already on the scoreboard could be removed by
-  // an active review). It plays the SAME raindrop chime as an ordinary review
+  // an active review). It plays the SAME cha-ching cash register sound as an ordinary review
   // and shares its cooldown, but it is tracked separately because it fires for
   // every review type (ABS included), fires on first load, and drives the
   // banner / badge / stat / filter tab and the optional desktop notification.
@@ -2302,13 +2302,13 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
   }
 
   /**
-   * Play a soft "raindrop chime" alert for challenges/reviews/boundary calls.
+   * Play a soft "cha-ching cash register sound" alert for challenges/reviews/boundary calls.
    * Uses Web Audio API (no external file) so it works on static hosting.
    *
    * Sound design (gentle but unmistakable — pleasant even when it fires often):
    *   - Three ascending water-drop "bloops": pure sine oscillators whose pitch
    *     falls fast (exponential ramp high→low, the classic synthesized-
-   *     raindrop technique) with a quick attack and a natural decay. The
+   *     cash register mechanism) with a quick attack and a natural decay. The
    *     rising plip-plop-ploop motif is instantly recognizable as "something
    *     happened" without any urgency or harshness.
    *   - A warm chime tail: two sine partials a perfect fifth apart bloom out
@@ -2328,10 +2328,13 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
   }
 
   /**
-   * Build and fire the raindrop-chime graph. No gating of its own — callers
-   * own the enable check and the cooldown. Kept separate so there is exactly
-   * ONE alert sound implementation in the file: the ordinary review chime and
-   * the run-at-risk alert are the same sound, and cannot drift apart.
+   * Build and fire a "cha-ching" cash register sound.
+   * Uses Web Audio API (no external file) so it works on static hosting.
+   *
+   * Sound design:
+   *   - "Cha": a sharp mechanical click/clack (short noise burst with fast decay)
+   *   - "Ching": a bright metallic bell tone (two sine partials with a slow decay)
+   *   - Total duration ~0.8s, punchy and unmistakable.
    */
   function playRaindropChime() {
     try {
@@ -2341,85 +2344,73 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
         ctx.resume().catch(() => {});
       }
       const t0 = ctx.currentTime;
-      const PEAK = 0.24; // soft level; the sine-only timbre keeps it gentle
+      const PEAK = 0.35; // slightly louder for the cash register punch
 
-      // Master bus: fades the whole alert out smoothly at the end.
+      // Master bus: quick fade out
       const master = ctx.createGain();
       master.gain.setValueAtTime(0, t0);
-      master.gain.linearRampToValueAtTime(1, t0 + 0.01);
-      master.gain.setValueAtTime(1, t0 + 1.05);
-      master.gain.linearRampToValueAtTime(0, t0 + 1.25);
+      master.gain.linearRampToValueAtTime(1, t0 + 0.005);
+      master.gain.setValueAtTime(1, t0 + 0.7);
+      master.gain.linearRampToValueAtTime(0, t0 + 0.85);
       master.connect(ctx.destination);
 
-      // Soft echo (spacious "rainy" tail): short delay with light feedback,
-      // low-passed so each repeat is mellower than the last.
-      const echo = ctx.createDelay(1);
-      echo.delayTime.value = 0.17;
-      const echoFilter = ctx.createBiquadFilter();
-      echoFilter.type = 'lowpass';
-      echoFilter.frequency.value = 1800;
-      const echoFeedback = ctx.createGain();
-      echoFeedback.gain.value = 0.25;
-      const echoMix = ctx.createGain();
-      echoMix.gain.value = 0.3;
-      master.connect(echo);
-      echo.connect(echoFilter);
-      echoFilter.connect(echoFeedback);
-      echoFeedback.connect(echo);
-      echoFilter.connect(echoMix);
-      echoMix.connect(ctx.destination);
+      // "CHA" — sharp mechanical click/clack
+      // Short burst of filtered noise with a very fast decay
+      const chaBuffer = ctx.createBuffer(1, Math.ceil(ctx.sampleRate * 0.03), ctx.sampleRate);
+      const chaData = chaBuffer.getChannelData(0);
+      for (let i = 0; i < chaData.length; i++) {
+        // White noise with exponential decay envelope
+        const envelope = Math.exp(-i / (chaData.length * 0.15));
+        chaData[i] = (Math.random() * 2 - 1) * envelope * 0.6;
+      }
+      const chaSource = ctx.createBufferSource();
+      chaSource.buffer = chaBuffer;
+      const chaFilter = ctx.createBiquadFilter();
+      chaFilter.type = 'bandpass';
+      chaFilter.frequency.value = 2200; // mid-high "clack" frequency
+      chaFilter.Q.value = 2.5;
+      const chaGain = ctx.createGain();
+      chaGain.gain.setValueAtTime(0, t0);
+      chaGain.gain.linearRampToValueAtTime(PEAK * 0.8, t0 + 0.001);
+      chaGain.gain.exponentialRampToValueAtTime(0.001, t0 + 0.04);
+      chaSource.connect(chaFilter);
+      chaFilter.connect(chaGain);
+      chaGain.connect(master);
+      chaSource.start(t0);
+      chaSource.stop(t0 + 0.05);
 
-      // One synthesized water drop: a sine that starts high and falls fast,
-      // with a quick attack and exponential decay. Returns its gain node so
-      // the caller sets level + timing.
-      const raindrop = (startAt, fromHz, toHz, level) => {
+      // "CHING" — bright metallic bell tone
+      // Two sine partials: fundamental + octave + slight detune for "metallic" quality
+      const chingStart = t0 + 0.035; // slight delay after "cha"
+      const fundamental = 880; // A5
+      const partials = [
+        { freq: fundamental, level: PEAK * 0.9 },      // fundamental
+        { freq: fundamental * 2, level: PEAK * 0.5 },  // octave
+        { freq: fundamental * 3, level: PEAK * 0.25 }, // 12th
+        { freq: fundamental * 4.25, level: PEAK * 0.15 }, // detuned upper partial for "ring"
+      ];
+      partials.forEach((p, i) => {
         const osc = ctx.createOscillator();
         osc.type = 'sine';
-        osc.frequency.setValueAtTime(fromHz, startAt);
-        osc.frequency.exponentialRampToValueAtTime(toHz, startAt + 0.09);
+        osc.frequency.value = p.freq;
         const g = ctx.createGain();
-        g.gain.setValueAtTime(0, startAt);
-        g.gain.linearRampToValueAtTime(level, startAt + 0.008);
-        g.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.38);
-        g.gain.setValueAtTime(0, startAt + 0.39);
+        // Stagger the attacks slightly for a richer attack transient
+        const attackDelay = i * 0.003;
+        g.gain.setValueAtTime(0, chingStart);
+        g.gain.linearRampToValueAtTime(p.level, chingStart + 0.005 + attackDelay);
+        // Long exponential decay like a struck bell
+        g.gain.exponentialRampToValueAtTime(0.0005, chingStart + 0.7);
+        g.gain.setValueAtTime(0, chingStart + 0.82);
         osc.connect(g);
-        osc.start(startAt);
-        osc.stop(startAt + 0.4);
-        return g;
-      };
+        g.connect(master);
+        osc.start(chingStart);
+        osc.stop(chingStart + 0.85);
+      });
 
-      // Three ascending drops — the recognizable alert motif.
-      raindrop(t0, 900, 340, PEAK).connect(master);
-      raindrop(t0 + 0.16, 1080, 400, PEAK).connect(master);
-      raindrop(t0 + 0.32, 1260, 470, PEAK).connect(master);
-
-      // Warm chime tail (perfect fifth dyad) so the event is obvious without
-      // any harshness. B5 + F#6 ring softly under the last drop's decay.
-      const chime = (freq, level) => {
-        const osc = ctx.createOscillator();
-        osc.type = 'sine';
-        osc.frequency.value = freq;
-        const g = ctx.createGain();
-        g.gain.setValueAtTime(0, t0 + 0.42);
-        g.gain.linearRampToValueAtTime(level, t0 + 0.46);
-        g.gain.exponentialRampToValueAtTime(0.0001, t0 + 1.2);
-        g.gain.setValueAtTime(0, t0 + 1.21);
-        osc.connect(g);
-        osc.start(t0 + 0.42);
-        osc.stop(t0 + 1.22);
-        return g;
-      };
-      chime(990, PEAK * 0.85).connect(master);
-      chime(1485, PEAK * 0.45).connect(master);
-
-      // Cleanup nodes after playback (alert ends 1.25s in; echo tail follows)
+      // Cleanup nodes after playback
       setTimeout(() => {
         try { master.disconnect(); } catch (_) {}
-        try { echo.disconnect(); } catch (_) {}
-        try { echoFilter.disconnect(); } catch (_) {}
-        try { echoFeedback.disconnect(); } catch (_) {}
-        try { echoMix.disconnect(); } catch (_) {}
-      }, 1800);
+      }, 1000);
     } catch (err) {
       console.warn('alert sound failed', err);
     }
@@ -2429,7 +2420,7 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
    * Run-at-risk alert: a run that is already on the scoreboard could be taken
    * off by an active review.
    *
-   * By request this plays the SAME gentle raindrop chime as an ordinary new
+   * By request this plays the SAME cha-ching cash register sound as an ordinary new
    * review — one alert sound for the whole page. It is not a separate voice,
    * it literally calls the same graph builder, so the two can never drift.
    *
@@ -2523,12 +2514,12 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
       btn.textContent = '🔔 Sound On';
       btn.classList.add('btn-sound-on');
       btn.classList.remove('btn-ghost');
-      btn.title = 'Alert sound ON — gentle raindrop chime for every tracked event: new challenges/reviews/boundary calls, official-scorer pending rulings, official scoring changes and ABS pitch challenges, plus the same chime whenever an active review could take a run OFF the scoreboard (any review type). Click to mute.';
+      btn.title = 'Alert sound ON — cha-ching cash register sound for every tracked event: new challenges/reviews/boundary calls, official-scorer pending rulings, official scoring changes and ABS pitch challenges, plus the same chime whenever an active review could take a run OFF the scoreboard (any review type). Click to mute.';
     } else {
       btn.textContent = '🔇 Sound Off';
       btn.classList.remove('btn-sound-on');
       btn.classList.add('btn-ghost');
-      btn.title = 'Alert sound OFF — click to enable the gentle raindrop chime for new challenges/reviews/boundary calls, official-scorer pending rulings, official scoring changes, and run-at-risk reviews';
+      btn.title = 'Alert sound OFF — click to enable the cha-ching cash register sound for new challenges/reviews/boundary calls, official-scorer pending rulings, official scoring changes, and run-at-risk reviews';
     }
   }
 
