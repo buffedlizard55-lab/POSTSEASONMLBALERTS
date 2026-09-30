@@ -556,7 +556,7 @@ assert.equal(visibleInAllFeed({ typeKey: 42 }), true);
 /* ---------------------- 11. Audio alert is a cash-register cha-ching
  *
  * Drives window.ReplayFeed against a recording AudioContext stub and verifies
- * the real sound graph: two filtered mechanical clicks, two rising metallic
+ * the real sound graph: two quick clicks and a drawer clunk, two rising metallic
  * notes, a 1.6-second master envelope, silence while muted, and the unchanged
  * cooldown / suspended-context behavior.
  */
@@ -575,20 +575,26 @@ ReplayFeed.setSoundEnabled(true);
 assert.equal(ReplayFeed.getSoundEnabled(), true);
 const previewCount = audioLog.oscillators.length;
 assert.equal(previewCount, 8, 'two struck notes each use four metallic partials');
-assert.equal(audioLog.sources.length, 2, 'the cha is a pair of mechanical noise clicks');
+assert.equal(audioLog.sources.length, 3, 'the register has two clicks and a drawer clunk');
 
-// 11c. The register clacks use real, short noise buffers and occur first.
-assert.equal(audioLog.buffers.length, 2);
+// 11c. The register mechanism uses short noise bursts around the bell strikes.
+assert.equal(audioLog.buffers.length, 3);
 audioLog.sources.forEach((source, index) => {
   assert.equal(source._kind, 'bufferSource');
   assert.ok(source.buffer.length > 0, 'each clack has an audio buffer');
   assert.ok(source.buffer.channelData.some((sample) => sample !== 0), 'noise buffer is non-silent');
-  assert.ok(source.startedAt < audioLog.oscillators[0].startedAt,
-    'mechanical cha precedes the metallic ching');
+  const filter = audioLog.edges.find(([node]) => node === source)?.[1];
+  assert.equal(filter?.type, 'bandpass', 'mechanical noise is filtered');
+  if (index === 2) assert.ok(filter.frequency.value < 600, 'drawer clunk is lower than the key clicks');
+  if (index < 2) assert.ok(source.startedAt < audioLog.oscillators[0].startedAt,
+    'key clicks precede the metallic ching');
+  else assert.ok(source.startedAt > audioLog.oscillators[4].startedAt,
+    'drawer clunk follows both bell strikes');
   assert.ok(source.stoppedAt > source.startedAt, 'clack source has a finite positive duration');
-  assert.ok(source.stoppedAt - source.startedAt <= 0.05, 'each clack is brief');
+  assert.ok(source.stoppedAt - source.startedAt <= (index === 2 ? 0.1 : 0.05),
+    'mechanical sounds have short finite durations');
   if (index > 0) assert.ok(source.startedAt > audioLog.sources[index - 1].startedAt,
-    'the second clack follows the first');
+    'each mechanical sound follows the previous one');
 });
 
 // 11d. The ching consists of two notes, with the second at a higher pitch.
@@ -625,20 +631,20 @@ assert.equal(Number((masterEnd.t - 100).toFixed(3)), 1.6,
 // 11f. The 2.5s cooldown: an immediate repeat is suppressed…
 ReplayFeed.playAlertSound();
 assert.equal(audioLog.oscillators.length, previewCount, 'cooldown blocks an immediate repeat');
-assert.equal(audioLog.sources.length, 2, 'cooldown also suppresses the mechanical clicks');
+assert.equal(audioLog.sources.length, 3, 'cooldown also suppresses the mechanical clicks');
 // …and after the cooldown a new alert plays.
 clockOffsetMs = 3000;
 audioLog.ctx.state = 'suspended';
 ReplayFeed.playAlertSound();
 assert.equal(audioLog.oscillators.length, previewCount * 2, 'alert plays again after the cooldown');
-assert.equal(audioLog.sources.length, 4, 'the second alert includes both clicks');
+assert.equal(audioLog.sources.length, 6, 'the second alert includes the clicks and drawer');
 assert.ok(audioLog.resumes >= 1, 'a suspended AudioContext is resumed before playing');
 
 // 11g. Disabling silences it again (and no preview on mute).
 ReplayFeed.setSoundEnabled(false);
 assert.equal(ReplayFeed.getSoundEnabled(), false);
 assert.equal(audioLog.oscillators.length, previewCount * 2, 'muting plays nothing');
-assert.equal(audioLog.sources.length, 4, 'muting plays no clicks');
+assert.equal(audioLog.sources.length, 6, 'muting plays no clicks');
 
 /* ------------------------- 12. Run-at-risk detection (the ASAP alert)
  *
@@ -823,7 +829,7 @@ assert.equal(audioLog.sources.length, 0, 'no register clacks while the toggle is
 ReplayFeed.setSoundEnabled(true);
 const ordinaryAlert = captureAlertGraph();
 assert.equal(ordinaryAlert.voices.length, 8, 'ordinary alert has eight bell partials');
-assert.equal(ordinaryAlert.clacks.length, 2, 'ordinary alert has two mechanical clacks');
+assert.equal(ordinaryAlert.clacks.length, 3, 'ordinary alert has two clicks and a drawer clunk');
 
 // 14c. Capture run-at-risk playback and compare the whole scheduled graph.
 resetAudioLog();
@@ -851,7 +857,7 @@ assert.equal(audioLog.oscillators.length, 0, 'an immediate run-at-risk repeat is
 clockOffsetMs = 130000;
 ReplayFeed.playRunRiskAlertSound();
 assert.equal(audioLog.oscillators.length, 8, 'it plays again after the shared 2.5s cooldown');
-assert.equal(audioLog.sources.length, 2, 'the repeat includes both mechanical clacks');
+assert.equal(audioLog.sources.length, 3, 'the repeat includes the clicks and drawer clunk');
 
 // 14e. A suspended context is resumed before the run-at-risk alert plays.
 const resumesBefore = audioLog.resumes;
