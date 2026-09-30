@@ -2304,105 +2304,121 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
   /**
    * The complete "cha-ching!" cash-register alert, as data.
    *
-   * WHAT THE SOUND IS (researched, not invented):
-   *   Every classic cash-register ring-up is three physical events layered:
-   *     1. "cha"  — the key/lever mechanism: a short burst of small mechanical
-   *                 clicks as the keys drop and the lever travels.
-   *     2. the bell — a small, hard metal bell, struck by a hammer as the
-   *                 drawer opens (the register bell was a security feature: it
-   *                 rang on every drawer open so the owner heard each sale).
-   *                 Its prime sits around 2 kHz with INHARMONIC partials and a
-   *                 long decay — that bright metallic ring is the "ching".
-   *     3. the drawer — it slides open on its rollers ("shhk") and stops with a
-   *                 low wooden/metal thud.
-   *   Sound-effect catalogues describe the same three layers ("Cash Register
-   *   Key With Bell And Drawer Opens"), and a measured reference clip of the
-   *   pop-culture ka-ching shows the bell prime at ~2.1 kHz with strong
-   *   inharmonic upper partials and a ~0.6 s ring.
+   * WHAT THE SOUND IS (measured from real cash-register recordings, not
+   * invented — docs/alert-sound.md lists the sources and the numbers):
    *
-   * HOW THIS DESIGN HITS IT:
-   *   - 4 lever clicks (0-0.10s) + a low body thump          → "cha"
-   *   - drawer slide 0.115-0.40s + drawer-stop thud at 0.40s → drawer opening
-   *   - bell struck TWICE (0.165s and 0.312s) on the same bell: the second
-   *     hit is brighter and a touch softer, which is what a double-struck
-   *     register bell sounds like ("ching-ching"). Both hits share one pitch
-   *     (a detuned pair would warble), and the 0.147s gap is chosen so the
-   *     two hits add rather than cancel at the bell's partials.
-   *   - ring-out to 1.60s, tail faded to silence at 1.95s, so the whole alert
-   *     lasts about two seconds as requested.
+   *   "cha"   the key drops, the gear train runs and the drawer springs open.
+   *           Broadband mechanical noise, ~0.23 s long, and — this is the
+   *           measurement that matters most — in every reference recording it
+   *           is as loud as the bell, not a quiet prelude to it.
+   *   "ching" one small hard metal bell, struck once by its hammer. Prime at
+   *           ~2.1 kHz with inharmonic partials. It does NOT ring on: two
+   *           independent recordings put the prime 20 dB down within 0.19 s of
+   *           the strike (time constants 0.168 s and 0.189 s). Upper partials
+   *           die faster; the low body partials linger, and it is those that
+   *           carry the tail out past a second.
+   *   drawer  slides out on its rollers and stops with a low thud. In the real
+   *           recordings the mechanism keeps moving AFTER the bell, so here
+   *           the drawer opens across the bell rather than ahead of it.
+   *
+   * WHY THE PREVIOUS BUILD SOUNDED WRONG, AND WHAT CHANGED:
+   *   1. It held the master gain at full level for 1.6 s and gave the bell
+   *      partials time constants of ~1 s. A real struck bell is ~0.19 s. The
+   *      result was a sustained tone — a chime — not a "ching". Fixed.
+   *   2. Its "cha" sat 10 dB under the bell, so the first syllable was never
+   *      really audible. Fixed: the mechanism is within a few dB of the bell.
+   *   3. It struck the bell twice ("ching-ching"). None of the reference
+   *      recordings shows a second bell strike — "cha-ching" has one "ching".
+   *      Fixed.
+   *   4. Its near-prime partial cluster was almost as loud as the prime, so
+   *      the tone beat and warbled instead of ringing clean. Fixed: measured
+   *      relative levels, about -11 dB for the partners around the prime.
    *
    * Everything is synthesized with the Web Audio API — no audio file, no
    * network fetch, nothing to load before the alert can fire.
    */
   const ALERT_SOUND = {
-    // Master envelope: fade in, hold the ring, fade the tail out.
-    level: 0.21,
-    fadeIn: 0.0025,
-    holdUntil: 1.60,
-    totalLength: 1.95,
+    // Master envelope. It sets the level and fades the tail away; it does not
+    // hold the sound up, because every layer carries its own decay and the
+    // bell has to be free to ring down like a struck bell.
+    level: 0.29,
+    fadeIn: 0.0015,
+    holdUntil: 0.85,
+    totalLength: 1.90,
 
-    // "cha": the lever/keys. Four tight clicks, each a short band-passed noise
-    // burst, plus one low body thump under them so it reads as a mechanism
-    // rather than as static.
-    leverClicks: [
-      { at: 0.000, centre: 2600, q: 1.1, duration: 0.020, level: 0.75 },
-      { at: 0.030, centre: 1900, q: 1.3, duration: 0.016, level: 0.55 },
-      { at: 0.060, centre: 3000, q: 1.0, duration: 0.014, level: 0.42 },
-      { at: 0.090, centre: 1700, q: 1.5, duration: 0.013, level: 0.32 },
+    // --- "cha": the mechanism ---------------------------------------------
+    // The key goes down: one bright clack…
+    keyClack: { at: 0.000, centre: 4200, q: 0.35, duration: 0.058, level: 2.60, attack: 0.0006 },
+    // …then the ratchet runs: five clicks falling in pitch as the spring
+    // unwinds and the lever travels.
+    gearClicks: [
+      { at: 0.024, centre: 3600, q: 0.8, duration: 0.032, level: 2.30 },
+      { at: 0.058, centre: 3000, q: 0.9, duration: 0.030, level: 2.00 },
+      { at: 0.094, centre: 2500, q: 1.0, duration: 0.028, level: 1.70 },
+      { at: 0.134, centre: 2000, q: 1.1, duration: 0.026, level: 1.40 },
+      { at: 0.178, centre: 1600, q: 1.2, duration: 0.024, level: 1.10 },
     ],
-    leverBody: {
-      at: 0.004, tones: [150, 96], level: 0.34, tau: 0.055,
-      noiseCentre: 320, noiseQ: 0.9, noiseDuration: 0.090, noiseLevel: 0.30,
-    },
+    // The body of the mechanism under the clicks: band-passed noise whose
+    // centre drifts downward while it plays, so it reads as a machine working
+    // rather than as hiss. This is the layer that makes the "cha" thick enough
+    // to actually land as a syllable.
+    ratchet: { at: 0.002, duration: 0.226, fromCentre: 3000, toCentre: 900, q: 0.45, level: 1.45 },
+    // The heavy case answering the key: a low knock that sags in pitch.
+    leverBody: { at: 0.004, tones: [196, 118], level: 0.42, tau: 0.042 },
 
-    // The drawer: it rolls open (a noise band whose centre sweeps downward, so
-    // it reads as movement) and then hits its stop with a low thud.
-    drawerSlide: {
-      at: 0.115, duration: 0.285, fromCentre: 2600, toCentre: 700, q: 0.7, level: 0.42,
-    },
+    // --- the drawer --------------------------------------------------------
+    // It starts rolling while the mechanism is still running and keeps going
+    // after the bell, which is what the real recordings do.
+    drawerSlide: { at: 0.040, duration: 0.560, fromCentre: 1900, toCentre: 430, q: 0.7, level: 1.05 },
     drawerStop: {
-      at: 0.400, tones: [170, 105], level: 0.20, tau: 0.050,
-      clickCentre: 800, clickQ: 1.2, clickDuration: 0.022, clickLevel: 0.09,
+      at: 0.600, tones: [158, 96], level: 0.44, tau: 0.055,
+      clickCentre: 950, clickQ: 1.1, clickDuration: 0.024, clickLevel: 0.16,
     },
 
-    // The bell. 2093 Hz (C7) is the measured prime of the reference ka-ching
-    // (~2.1 kHz); the partials are deliberately inharmonic — a struck metal
-    // bell is not a harmonic series — and the higher a partial sits, the
-    // faster it dies away, which is what makes a bell sound like a bell.
+    // --- "ching": the register bell, struck ONCE ---------------------------
+    // 2093 Hz is the measured prime of two real cash-register recordings
+    // (2100 Hz and 2097 Hz). The ratios, levels and time constants below are
+    // the measured values: the prime's tau is 0.19 s, the bright metallic
+    // pair at 2.29x / 2.53x sits about 6 dB under it and dies faster, and the
+    // low body partials outlast everything so the tail reaches ~1.6 s. The
+    // whole sound as rendered measures -5.0 dBFS peak, prime tau 0.191 s, is
+    // audible for ~1.6 s, and the bell sits 0.7 dB BELOW the mechanism (the
+    // real recordings measure +0.4 dB and -3.1 dB).
     bellFundamental: 2093,
     bellPartials: [
-      { ratio: 0.500, gain: 0.17, tau: 1.25 },  // hum note, warms small speakers
-      { ratio: 0.972, gain: 0.52, tau: 0.95 },  // struck cluster around the prime
-      { ratio: 1.000, gain: 1.00, tau: 1.05 },  // the prime: the "ching" itself
-      { ratio: 1.013, gain: 0.44, tau: 0.88 },  // beats against the prime (shimmer)
-      { ratio: 1.300, gain: 0.30, tau: 0.60 },
-      { ratio: 1.590, gain: 0.20, tau: 0.45 },
-      { ratio: 2.190, gain: 0.36, tau: 0.38 },
-      { ratio: 2.420, gain: 0.22, tau: 0.30 },
-      { ratio: 2.830, gain: 0.14, tau: 0.24 },
-      { ratio: 3.680, gain: 0.14, tau: 0.18 },
-      { ratio: 5.500, gain: 0.07, tau: 0.13 },  // air/metallic sizzle
+      { ratio: 0.271, gain: 0.16, tau: 0.32 },  //  567 Hz  case/body resonance
+      { ratio: 0.370, gain: 0.28, tau: 0.29 },  //  774 Hz
+      { ratio: 0.478, gain: 0.25, tau: 0.27 },  // 1000 Hz
+      { ratio: 0.694, gain: 0.28, tau: 0.25 },  // 1453 Hz
+      { ratio: 0.948, gain: 0.29, tau: 0.21 },  // 1984 Hz  partner just under the prime
+      { ratio: 1.000, gain: 1.00, tau: 0.19 },  // 2093 Hz  the prime — the "ching" itself
+      { ratio: 1.030, gain: 0.13, tau: 0.19 },  // 2156 Hz  partner just over it
+      { ratio: 1.175, gain: 0.32, tau: 0.17 },  // 2459 Hz
+      { ratio: 1.412, gain: 0.36, tau: 0.16 },  // 2955 Hz
+      { ratio: 1.567, gain: 0.29, tau: 0.15 },  // 3280 Hz
+      { ratio: 1.773, gain: 0.28, tau: 0.14 },  // 3711 Hz
+      { ratio: 2.139, gain: 0.28, tau: 0.13 },  // 4477 Hz
+      { ratio: 2.291, gain: 0.50, tau: 0.13 },  // 4795 Hz  the bright metallic pair
+      { ratio: 2.526, gain: 0.53, tau: 0.13 },  // 5287 Hz
+      { ratio: 2.732, gain: 0.26, tau: 0.12 },  // 5718 Hz
+      { ratio: 3.687, gain: 0.11, tau: 0.11 },  // 7717 Hz
+      { ratio: 5.500, gain: 0.05, tau: 0.09 },  // 11512 Hz air
     ],
-    bellStrikes: [
-      { at: 0.165, level: 0.50, bright: 1.0 },
-      // Second tap: brighter, a touch softer, 0.147s later — far enough to
-      // read as a second hit, close enough that the two hits reinforce each
-      // other's partials instead of cancelling them.
-      { at: 0.312, level: 0.45, bright: 1.6 },
-    ],
-    bellAttack: 0.003,
-    // The hammer hits the bell a moment before the tone blooms: a 9ms bright
-    // tick per strike is what gives each hit its "ching" transient.
-    hammerTick: { lead: 0.003, duration: 0.009, centre: 4500, q: 0.7, level: 0.75 },
-    // Partials are cut off a few time-constants after the strike, but the
-    // master fade has already silenced them by then.
-    tailTimeConstants: 5,
+    // One strike: "cha-CHING", not "ching-ching".
+    bellStrikes: [{ at: 0.230, level: 0.40 }],
+    bellAttack: 0.002,
+    // The hammer reaching the bell a beat before the tone blooms: that tick is
+    // what gives the strike its transient.
+    hammerTick: { lead: 0.004, duration: 0.006, centre: 6500, q: 0.7, level: 5.00 },
+    // Partials are cut off a few time-constants after the strike; the master
+    // fade has already silenced them by then.
+    tailTimeConstants: 7,
   };
 
   /**
    * One short mechanical noise burst: a band-passed burst with a fast attack
-   * and an exponential decay. Used for the lever clicks, the drawer slide and
-   * the hammer tick.
+   * and an exponential decay. Used for the key clack, the gear clicks, the
+   * hammer tick and the drawer-stop click.
    */
   function noiseBurst (ctx, destination, at, opts) {
     const duration = opts.duration;
@@ -2429,10 +2445,12 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
   }
 
   /**
-   * The drawer rolling open: band-passed noise whose centre frequency sweeps
-   * down while it plays, so the ear hears travel rather than a static hiss.
+   * A band of noise whose centre frequency sweeps downward while it plays, so
+   * the ear hears travel rather than a static hiss. Used twice: for the body
+   * of the mechanism under the gear clicks (the "cha"), and for the drawer
+   * rolling out on its rollers.
    */
-  function drawerSlide (ctx, destination, at, spec) {
+  function sweptNoise (ctx, destination, at, spec) {
     const frames = Math.max(1, Math.ceil(ctx.sampleRate * spec.duration));
     const buffer = ctx.createBuffer(1, frames, ctx.sampleRate);
     const samples = buffer.getChannelData(0);
@@ -2485,10 +2503,11 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
   /**
    * One hammer strike on the register bell: the bright tick of the hammer,
    * then every inharmonic partial starting together and decaying at its own
-   * rate. `bright` scales the upper partials only, which is how the second
-   * tap of a double-struck bell differs from the first.
+   * measured rate — the low body partials slowly, the bright metallic ones
+   * fast. That spread of decay times is what makes a struck bell read as
+   * metal instead of as a tone.
    */
-  function bellStrike (ctx, destination, at, level, bright, spec, endAt) {
+  function bellStrike (ctx, destination, at, level, spec, endAt) {
     noiseBurst(ctx, destination, at - spec.hammerTick.lead, {
       duration: spec.hammerTick.duration,
       centre: spec.hammerTick.centre,
@@ -2502,7 +2521,7 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
       osc.type = 'sine';
       osc.frequency.value = spec.bellFundamental * partial.ratio;
       const gain = ctx.createGain();
-      const peak = level * partial.gain * (partial.ratio >= 1.3 ? bright : 1);
+      const peak = level * partial.gain;
       const decayTo = at + spec.bellAttack + partial.tau * spec.tailTimeConstants;
       gain.gain.setValueAtTime(0.0001, at);
       gain.gain.linearRampToValueAtTime(peak, at + spec.bellAttack);
@@ -2535,24 +2554,24 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
     master.gain.linearRampToValueAtTime(0, t0 + sound.totalLength);
     master.connect(destination);
 
-    // --- "cha": keys/lever travel, then the drawer opens ---------------------
-    sound.leverClicks.forEach((click) => {
+    // --- "cha": the key drops and the mechanism runs ------------------------
+    // This is the first syllable and it is LOUD — in every reference
+    // recording the mechanism is within a few dB of the bell, not a quiet
+    // ticking underneath it.
+    noiseBurst(ctx, master, t0 + sound.keyClack.at, sound.keyClack);
+    sound.gearClicks.forEach((click) => {
       noiseBurst(ctx, master, t0 + click.at, click);
     });
+    sweptNoise(ctx, master, t0 + sound.ratchet.at, sound.ratchet);
     thump(ctx, master, t0 + sound.leverBody.at, sound.leverBody.tones,
       sound.leverBody.level, sound.leverBody.tau);
-    noiseBurst(ctx, master, t0 + sound.leverBody.at, {
-      duration: sound.leverBody.noiseDuration,
-      centre: sound.leverBody.noiseCentre,
-      q: sound.leverBody.noiseQ,
-      level: sound.leverBody.noiseLevel,
-    });
 
-    drawerSlide(ctx, master, t0 + sound.drawerSlide.at, sound.drawerSlide);
+    // --- the drawer starts rolling while the mechanism is still running -----
+    sweptNoise(ctx, master, t0 + sound.drawerSlide.at, sound.drawerSlide);
 
-    // --- "ching": the register bell, struck twice ---------------------------
+    // --- "ching": the register bell, struck once ----------------------------
     sound.bellStrikes.forEach((strike) => {
-      bellStrike(ctx, master, t0 + strike.at, strike.level, strike.bright, sound, t0 + sound.totalLength);
+      bellStrike(ctx, master, t0 + strike.at, strike.level, sound, t0 + sound.totalLength);
     });
 
     // --- the drawer reaches its stop ---------------------------------------

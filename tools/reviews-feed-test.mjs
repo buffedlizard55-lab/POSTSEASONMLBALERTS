@@ -556,10 +556,11 @@ assert.equal(visibleInAllFeed({ typeKey: 42 }), true);
 /* ---------------------- 11. Audio alert is a cash-register cha-ching
  *
  * Drives window.ReplayFeed against a recording AudioContext stub and verifies
- * the real sound graph against the alert's own design data (ALERT_SOUND):
- * the lever clicks and drawer that make the "cha", the inharmonic metal bell
- * struck twice that makes the "ching", the ~2-second master envelope, silence
- * while muted, and the unchanged cooldown / suspended-context behavior.
+ * the real sound graph against the alert's own design data (ALERT_SOUND): the
+ * key clack, gear clicks and ratchet that make the "cha", the inharmonic metal
+ * bell struck ONCE that makes the "ching", the drawer that keeps moving after
+ * it, the ~2-second master envelope, silence while muted, and the unchanged
+ * cooldown / suspended-context behaviour.
  *
  * Nothing here is a hard-coded node count: the expected graph is derived from
  * ALERT_SOUND, so the test fails if the design data and the builder drift.
@@ -577,11 +578,12 @@ const BELL_STRIKES = SPEC.bellStrikes.length;
 const BELL_PARTIALS = SPEC.bellPartials.length;
 const THUMPS = [SPEC.leverBody, SPEC.drawerStop];
 const THUMP_TONES = THUMPS.reduce((n, t) => n + t.tones.length, 0);
-const NOISE_SOURCES = SPEC.leverClicks.length       // lever clicks
-  + 1                                               // lever body noise
-  + 1                                               // drawer slide
-  + BELL_STRIKES                                     // one hammer tick per strike
-  + 1;                                               // drawer-stop click
+const NOISE_SOURCES = 1                                          // the key clack
+  + SPEC.gearClicks.length                                       // the ratchet clicks
+  + 1                                                            // the mechanism bed
+  + 1                                                            // the drawer slide
+  + BELL_STRIKES                                                 // one hammer tick per strike
+  + 1;                                                           // the drawer-stop click
 const EXPECTED_OSCILLATORS = BELL_STRIKES * BELL_PARTIALS + THUMP_TONES;
 
 // 11a. Disabled by default (no localStorage in this VM): nothing plays.
@@ -596,15 +598,16 @@ assert.equal(ReplayFeed.getSoundEnabled(), true);
 const previewCount = audioLog.oscillators.length;
 const previewSources = audioLog.sources.length;
 assert.equal(previewCount, EXPECTED_OSCILLATORS,
-  `${BELL_STRIKES} bell strikes x ${BELL_PARTIALS} partials plus ${THUMP_TONES} thud tones`);
+  `${BELL_STRIKES} bell strike(s) x ${BELL_PARTIALS} partials plus ${THUMP_TONES} thud tones`);
 assert.equal(previewSources, NOISE_SOURCES, 'every mechanical noise layer is scheduled');
 
-// 11c. The "cha": every mechanical layer is a short band-passed noise burst,
-// the lever clicks come first, and the drawer slide sweeps downward as it
-// plays (a drawer rolling open, not a static hiss).
+// 11c. The "cha": every mechanical layer is a short band-passed noise burst or
+// a swept noise band, the key lands first, and the whole mechanism is still
+// running when the bell is struck. The mechanism is deliberately LOUD — in
+// every reference recording the "cha" is level with the bell, and burying it
+// is what made the previous build sound like a plain chime.
 assert.equal(audioLog.buffers.length, NOISE_SOURCES, 'each mechanical layer owns its own noise buffer');
-const clacks = audioLog.sources;
-clacks.forEach((source) => {
+audioLog.sources.forEach((source) => {
   assert.equal(source._kind, 'bufferSource');
   assert.ok(source.buffer.length > 0, 'each mechanical sound has an audio buffer');
   assert.ok(source.buffer.channelData.some((sample) => sample !== 0), 'noise buffer is non-silent');
@@ -612,42 +615,51 @@ clacks.forEach((source) => {
   assert.equal(filter?.type, 'bandpass', 'mechanical noise is band-pass filtered');
   assert.ok(source.stoppedAt === undefined, 'buffer sources are not force-stopped early');
 });
-// Every mechanical layer is scheduled at the time the design says, and the
-// whole "cha" (lever + drawer) is in motion before the bell is struck.
 const struck = 100 + SPEC.bellStrikes[0].at;
-SPEC.leverClicks.forEach((click, index) => {
-  assert.equal(audioLog.sources[index].startedAt, 100 + click.at,
-    'lever click ' + (index + 1) + ' fires at its designed time');
-  assert.ok(audioLog.sources[index].startedAt < struck, 'the lever works before the bell rings');
+assert.equal(audioLog.sources[0].startedAt, 100 + SPEC.keyClack.at, 'the key clack fires first');
+assert.ok(audioLog.sources[0].startedAt < struck, 'the key is down before the bell rings');
+SPEC.gearClicks.forEach((click, index) => {
+  assert.equal(audioLog.sources[1 + index].startedAt, 100 + click.at,
+    'gear click ' + (index + 1) + ' fires at its designed time');
+  assert.ok(audioLog.sources[1 + index].startedAt < struck, 'the gear train runs before the bell');
 });
-assert.equal(audioLog.sources[SPEC.leverClicks.length].startedAt, 100 + SPEC.leverBody.at,
-  'the low body thump of the mechanism fires at its designed time');
-const slideSource = audioLog.sources[SPEC.leverClicks.length + 1];
-assert.equal(slideSource.startedAt, 100 + SPEC.drawerSlide.at, 'the drawer slide starts when designed');
-assert.ok(slideSource.startedAt < struck, 'the drawer is already opening when the bell rings');
-const tickSources = audioLog.sources.slice(SPEC.leverClicks.length + 2, SPEC.leverClicks.length + 2 + BELL_STRIKES);
+const bedIndex = 1 + SPEC.gearClicks.length;
+assert.equal(audioLog.sources[bedIndex].startedAt, 100 + SPEC.ratchet.at,
+  'the mechanism bed runs under the clicks');
+assert.equal(audioLog.sources[bedIndex + 1].startedAt, 100 + SPEC.drawerSlide.at,
+  'the drawer starts rolling while the mechanism is still running');
+assert.ok(audioLog.sources[bedIndex + 1].startedAt < struck, 'the drawer opens across the bell, not before it');
 SPEC.bellStrikes.forEach((strike, index) => {
-  assert.equal(tickSources[index].startedAt, 100 + strike.at - SPEC.hammerTick.lead,
-    'the hammer tick lands just before strike ' + (index + 1));
+  const tick = audioLog.sources[bedIndex + 2 + index];
+  assert.equal(tick.startedAt, 100 + strike.at - SPEC.hammerTick.lead,
+    'the hammer tick lands just before the strike');
 });
-assert.equal(audioLog.sources[SPEC.leverClicks.length + 2 + BELL_STRIKES].startedAt, 100 + SPEC.drawerStop.at,
-  'the drawer-stop thud fires after the bell');
-// The drawer slide's filter frequency ramps from fromCentre down to toCentre.
+assert.equal(audioLog.sources[bedIndex + 2 + BELL_STRIKES].startedAt, 100 + SPEC.drawerStop.at,
+  'the drawer-stop thud fires after the bell, as it does in real recordings');
+// Both swept noise bands (the mechanism bed and the drawer) ramp downward.
 const sweeps = audioLog.edges
   .map(([, target]) => target)
   .filter((node) => node._kind === 'filter' && node._freqEvents.length >= 2);
-assert.equal(sweeps.length, 1, 'exactly one swept filter (the drawer slide)');
-const slideEvents = sweeps[0]._freqEvents;
-assert.equal(slideEvents[0].v, SPEC.drawerSlide.fromCentre, 'slide starts at the high centre frequency');
-assert.equal(slideEvents[slideEvents.length - 1].v, SPEC.drawerSlide.toCentre, 'slide sweeps down');
-assert.ok(SPEC.drawerSlide.toCentre < SPEC.drawerSlide.fromCentre, 'the drawer sweep really descends');
+assert.equal(sweeps.length, 2, 'two swept filters: the mechanism bed and the drawer slide');
+[[SPEC.ratchet, 'mechanism bed'], [SPEC.drawerSlide, 'drawer slide']].forEach(([spec, label]) => {
+  assert.ok(spec.toCentre < spec.fromCentre, `the ${label} sweep really descends`);
+});
+sweeps.forEach((node) => {
+  const events = node._freqEvents;
+  const lo = Math.min(events[0].v, events[events.length - 1].v);
+  const hi = Math.max(events[0].v, events[events.length - 1].v);
+  const matches = [SPEC.ratchet, SPEC.drawerSlide].some((spec) =>
+    Math.abs(hi - spec.fromCentre) < 1e-6 && Math.abs(lo - spec.toCentre) < 1e-6);
+  assert.ok(matches, 'each swept filter runs from its designed high centre down to its low centre');
+});
 
-// 11d. The "ching": every bell partial is a sine at fundamental x ratio; higher
-// partials decay faster than lower ones (that is what makes it read as metal,
-// not as a tone); the second strike is brighter in its upper partials.
+// 11d. The "ching": every bell partial is a sine at fundamental x ratio; the
+// prime decays with the measured ~0.19 s time constant (a struck bell, not a
+// sustained tone); the low body partials outlast the prime and the bright
+// metallic ones die before it — that spread is what reads as metal.
 const bellOscillators = audioLog.oscillators.filter((osc) => osc.type === 'sine');
 assert.equal(bellOscillators.length, BELL_STRIKES * BELL_PARTIALS,
-  'the bell graph is ' + BELL_STRIKES + ' strikes x ' + BELL_PARTIALS + ' partials');
+  'the bell graph is ' + BELL_STRIKES + ' strike(s) x ' + BELL_PARTIALS + ' partials');
 const expectedFrequencies = [];
 SPEC.bellStrikes.forEach(() => SPEC.bellPartials.forEach((p) => {
   expectedFrequencies.push(SPEC.bellFundamental * p.ratio);
@@ -663,7 +675,6 @@ const decayOf = (osc) => {
   const gain = audioLog.edges.find(([src]) => src === osc)?.[1];
   return Math.max(...gain._gainEvents.map((event) => event.t));
 };
-const startOf = (osc) => osc.startedAt;
 // Group partials by strike (same start time) and check decay order per strike.
 const byStart = new Map();
 bellOscillators.forEach((osc) => {
@@ -671,27 +682,31 @@ bellOscillators.forEach((osc) => {
   if (!byStart.has(key)) byStart.set(key, []);
   byStart.get(key).push(osc);
 });
-assert.equal(byStart.size, BELL_STRIKES, 'the bell is struck exactly ' + BELL_STRIKES + ' times');
-byStart.forEach((group, key) => {
+assert.equal(byStart.size, BELL_STRIKES, 'the bell is struck exactly ' + BELL_STRIKES + ' time(s)');
+
+// The measured shape: tau falls as the partial rises, and the prime's own time
+// constant is the 0.168-0.196 s that real register bells were measured at.
+const primePartial = SPEC.bellPartials.find((p) => p.ratio === 1);
+assert.ok(primePartial, 'the design names a prime partial');
+assert.ok(primePartial.tau >= 0.13 && primePartial.tau <= 0.28,
+  'the prime time constant matches the measured 0.17-0.20 s of real register bells');
+const byRatio = SPEC.bellPartials.slice().sort((a, b) => a.ratio - b.ratio);
+for (let i = 1; i < byRatio.length; i++) {
+  assert.ok(byRatio[i].tau <= byRatio[i - 1].tau + 1e-9,
+    `partial ${byRatio[i].ratio}x decays no slower than ${byRatio[i - 1].ratio}x (higher partials die first)`);
+}
+assert.ok(byRatio[0].tau > primePartial.tau,
+  'the lowest body partial outlasts the prime, which is what carries the tail');
+const brightest = byRatio[byRatio.length - 1];
+assert.ok(brightest.tau < primePartial.tau, 'the top metallic partial dies before the prime');
+
+byStart.forEach((group) => {
   assert.equal(group.length, BELL_PARTIALS, 'each strike excites every partial');
-  // The hum note (ratio 0.5) outlasts everything and the tight prime cluster
-  // (0.972-1.013) rings longest of the struck partials — that is what a bell's
-  // hum and prime do. The upper metallic partials must each die away faster
-  // than the cluster, and each faster than the one below it.
-  const hum = group.find((osc) => Math.abs(osc.frequency.value - SPEC.bellFundamental * 0.5) < 1e-6);
-  const cluster = group.filter((osc) => osc.frequency.value >= SPEC.bellFundamental * 0.97
-    && osc.frequency.value <= SPEC.bellFundamental * 1.02);
-  const upper = group
-    .filter((osc) => osc.frequency.value >= SPEC.bellFundamental * 1.3)
-    .sort((a, b) => a.frequency.value - b.frequency.value);
-  assert.ok(decayOf(hum) > Math.max(...cluster.map(decayOf)), 'the hum note outlasts the prime cluster');
-  assert.ok(Math.min(...cluster.map(decayOf)) > Math.max(...upper.map(decayOf)),
-    'every upper partial dies away before the prime cluster does');
-  for (let i = 1; i < upper.length; i++) {
-    assert.ok(decayOf(upper[i]) <= decayOf(upper[i - 1]) + 1e-9,
-      'each higher metallic partial decays no slower than the one below it');
-  }
   const ordered = group.slice().sort((a, b) => a.frequency.value - b.frequency.value);
+  for (let i = 1; i < ordered.length; i++) {
+    assert.ok(decayOf(ordered[i]) <= decayOf(ordered[i - 1]) + 1e-9,
+      'in the built graph, each higher partial stops no later than the one below it');
+  }
   ordered.forEach((osc) => {
     const gain = audioLog.edges.find(([src]) => src === osc)[1];
     const events = gain._gainEvents;
@@ -699,32 +714,18 @@ byStart.forEach((group, key) => {
     assert.ok(kinds.includes('lin') && kinds.includes('exp'), 'partials attack then decay exponentially');
     const peaks = events.filter((event) => event.kind === 'lin').map((event) => event.v);
     assert.ok(Math.max(...peaks) > 0, 'partial has a positive attack level');
-    assert.ok(Math.max(...peaks) <= 0.5, 'a single partial never exceeds the strike level');
   });
 });
-// The second strike is the brighter one (upper partials lifted), so its high
-// partials are louder than the first strike's at the same frequency.
-const strikes = [...byStart.entries()].sort((a, b) => Number(a[0]) - Number(b[0]));
-const peakAt = (group, ratio) => {
-  const osc = group.find((o) => Math.abs(o.frequency.value - SPEC.bellFundamental * ratio) < 1e-6);
-  const gain = audioLog.edges.find(([src]) => src === osc)[1];
-  return Math.max(...gain._gainEvents.filter((e) => e.kind === 'lin').map((e) => e.v));
-};
-const upper = SPEC.bellPartials.filter((p) => p.ratio >= 1.3).map((p) => p.ratio);
-const brightest = upper[upper.length - 1];
-assert.ok(peakAt(strikes[1][1], brightest) / peakAt(strikes[0][1], brightest) > 1.2,
-  'the second strike is the brighter tap (upper partials lifted)');
-assert.ok(peakAt(strikes[1][1], 1) < peakAt(strikes[0][1], 1),
-  'the second strike is a little softer in the prime');
-// Each hammer tick lands just before its strike.
+// One strike only: "cha-CHING", not "ching-ching".
+assert.equal(SPEC.bellStrikes.length, 1, 'the bell is struck once');
 const tickBefore = SPEC.bellStrikes.every((strike) => {
   const tickTime = strike.at - SPEC.hammerTick.lead;
   return audioLog.sources.some((src) => Math.abs(src.startedAt - (100 + tickTime)) < 1e-6);
 });
 assert.ok(tickBefore, 'every bell strike has its hammer tick just before it');
 
-// 11e. The master envelope runs the designed length (about two seconds), and
-// fades to silence without ever clipping the sum of the layers.
+// 11e. The master envelope runs the designed length (about two seconds), never
+// props the sound up past the hold point, and fades to silence.
 const masterEdge = audioLog.edges.find(([, target]) => target._kind === 'destination');
 assert.ok(masterEdge, 'the master gain connects to the audio destination');
 const masterEvents = masterEdge[0]._gainEvents;
@@ -735,6 +736,11 @@ assert.equal(Number((masterEnd.t - 100).toFixed(3)), SPEC.totalLength,
 assert.ok(SPEC.totalLength >= 1.5, 'the alert is at least 1.5 seconds long');
 assert.equal(Math.max(...masterEvents.map((event) => event.v)), SPEC.level,
   'the master gain holds the designed alert level');
+// It must NOT hold the level past holdUntil — the bell has to be free to ring
+// down on its own (holding it flat is what made the old build a chime).
+const holdEvent = masterEvents.find((event) => event.t === 100 + SPEC.holdUntil);
+assert.ok(holdEvent && holdEvent.v === SPEC.level, 'the master holds until ' + SPEC.holdUntil + 's');
+assert.ok(SPEC.holdUntil < SPEC.totalLength, 'the envelope then fades instead of holding to the end');
 
 // 11f. The 2.5s cooldown: an immediate repeat is suppressed…
 ReplayFeed.playAlertSound();
@@ -950,16 +956,15 @@ const runRiskAlert = captureAlertGraph();
 assert.deepEqual(runRiskAlert, ordinaryAlert,
   'run-at-risk must use the exact same cash-register sound and timings');
 
-// The signature remains the same two-strike metal bell with the same envelope.
+// The signature remains the same metal bell, struck once, with the same envelope.
 assert.equal(runRiskAlert.voices.length, EXPECTED_OSCILLATORS);
 const sines = runRiskAlert.voices.filter((voice) => voice.type === 'sine');
 const thuds = runRiskAlert.voices.filter((voice) => voice.type === 'triangle');
 assert.equal(sines.length, BELL_STRIKES * BELL_PARTIALS, 'every bell strike keeps its full partial set');
 assert.equal(thuds.length, THUMP_TONES, 'the mechanical thuds are still there');
 const primes = sines.filter((voice) => Math.abs(voice.frequency - SPEC.bellFundamental) < 1e-6);
-assert.equal(primes.length, BELL_STRIKES, 'both bell strikes ring at the register-bell pitch');
-assert.ok(Math.abs((primes[1].start - primes[0].start) - (SPEC.bellStrikes[1].at - SPEC.bellStrikes[0].at)) < 1e-6,
-  'the second tap is spaced exactly as designed');
+assert.equal(primes.length, BELL_STRIKES, 'the bell strike rings at the register-bell pitch');
+assert.equal(primes[0].start, 100 + SPEC.bellStrikes[0].at, 'the strike lands where the design says');
 assert.ok(runRiskAlert.master.includes('lin@' + SPEC.level + 't' + (100 + SPEC.holdUntil)),
   'the master envelope holds the ring at full level until ' + SPEC.holdUntil + 's');
 assert.ok(runRiskAlert.master.includes('lin@0t' + (100 + SPEC.totalLength)),
@@ -977,7 +982,7 @@ ReplayFeed.playRunRiskAlertSound();
 assert.equal(audioLog.oscillators.length, EXPECTED_OSCILLATORS,
   'it plays again after the shared 2.5s cooldown');
 assert.equal(audioLog.sources.length, NOISE_SOURCES,
-  'the repeat includes the clicks, the drawer and the hammer ticks');
+  'the repeat includes the key clack, the gear clicks, the ratchet, the drawer and the hammer tick');
 
 // 14e. A suspended context is resumed before the run-at-risk alert plays.
 const resumesBefore = audioLog.resumes;

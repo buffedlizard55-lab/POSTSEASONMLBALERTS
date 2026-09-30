@@ -2,7 +2,7 @@
 
 **Live MLB alert feed for every tracked event — manager challenges, crew-chief/umpire reviews, boundary calls, ABS pitch challenges, official-scorer pending rulings and official scoring changes — all in one complete "All" feed, with chime alerts and live tracking.**
 
-A copy of [MLB-Live-PBP](https://buffedlizard55-lab.github.io/MLB-Live-PBP/reviews.html) with two intentional differences: **ABS pitch challenges are included in the "All" feed, alert system, and live tracking** (upstream excludes them from All/alerts during the regular season to limit volume), and the alert sound is a synthesized ~2-second cha-ching cash-register ring-up (lever/keys, drawer, and a double-struck metal bell) — see [`docs/alert-sound.md`](docs/alert-sound.md). Other behavior remains aligned with upstream.
+A copy of [MLB-Live-PBP](https://buffedlizard55-lab.github.io/MLB-Live-PBP/reviews.html) with two intentional differences: **ABS pitch challenges are included in the "All" feed, alert system, and live tracking** (upstream excludes them from All/alerts during the regular season to limit volume), and the alert sound is a synthesized ~2-second cha-ching cash-register ring-up (key clack, gears, a drawer springing open, and a metal bell struck once) — see [`docs/alert-sound.md`](docs/alert-sound.md). Other behavior remains aligned with upstream.
 
 ---
 
@@ -10,7 +10,7 @@ A copy of [MLB-Live-PBP](https://buffedlizard55-lab.github.io/MLB-Live-PBP/revie
 
 > This block is the standing source of truth for what we are building. Re-read it before every session so every change, suggestion and upgrade stays anchored to it.
 >
-> **Goal.** Copy the MLB-Live-PBP repo and site (https://buffedlizard55-lab.github.io/MLB-Live-PBP/reviews.html). The feed change is that all tracked alerts appear in the All feed, including ABS challenges that upstream excludes during the regular season. A sound customization request changed the alert audio to a synthesized cha-ching cash-register sound (researched and measured: lever/key clicks, a drawer opening, and a bright inharmonic bell struck twice, ringing for ~2 seconds); alert categories, timing, and other behavior remain unchanged. Full record: [`docs/alert-sound.md`](docs/alert-sound.md).
+> **Goal.** Copy the MLB-Live-PBP repo and site (https://buffedlizard55-lab.github.io/MLB-Live-PBP/reviews.html). The feed change is that all tracked alerts appear in the All feed, including ABS challenges that upstream excludes during the regular season. A sound customization request changed the alert audio to a synthesized cha-ching cash-register sound (researched and measured against three real register recordings: a broadband key/gear/drawer "cha" level with the bell, and a bright inharmonic ~2.1 kHz bell struck ONCE with a 0.19 s time constant, audible for ~1.6 seconds); alert categories, timing, and other behavior remain unchanged. Full record: [`docs/alert-sound.md`](docs/alert-sound.md).
 >
 > **Why.** It should solve the problem of having to manually check everything ourselves — one up-to-date, current feed that shows what is happening across the whole slate without hunting.
 >
