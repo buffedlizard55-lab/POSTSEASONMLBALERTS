@@ -653,8 +653,39 @@ sweeps.forEach((node) => {
   assert.ok(matches, 'each swept filter runs from its designed high centre down to its low centre');
 });
 
+// 11c-bis. The bed is a RATTLE, not a smooth band of noise. This is the change
+// that matters most: the replaced build's "cha" was one level band of noise
+// (2.9 dB of envelope variation, 2 detectable attacks) where real recordings
+// measure 3 and 10 attacks. The bed's own buffer therefore has to be chopped
+// into uneven bursts, which is what `rattle` does at build time.
+assert.ok(SPEC.ratchet.rattle > 0.5,
+  'the mechanism bed is chopped into bursts (a rattle), not left smooth');
+const bedBuffer = audioLog.sources[bedIndex].buffer.channelData;
+const bedFrames = bedBuffer.length;
+const CHUNK = Math.max(1, Math.floor(bedFrames / 40));
+const bedLevels = [];
+for (let i = 0; i + CHUNK <= bedFrames; i += CHUNK) {
+  let sum = 0;
+  for (let k = i; k < i + CHUNK; k++) sum += bedBuffer[k] * bedBuffer[k];
+  bedLevels.push(Math.sqrt(sum / CHUNK));
+}
+const bedMean = bedLevels.reduce((a, b) => a + b, 0) / bedLevels.length;
+const bedVariation = Math.sqrt(
+  bedLevels.reduce((a, v) => a + (v - bedMean) ** 2, 0) / bedLevels.length) / bedMean;
+assert.ok(bedVariation > 0.25,
+  `the mechanism bed's noise really is modulated (relative sd ${bedVariation.toFixed(2)})`);
+assert.ok(Math.max(...bedLevels) > 2 * Math.min(...bedLevels),
+  'the bed has loud bursts and quiet gaps, so the "cha" has transients');
+// The "cha" has to be BRIGHT: the references' mechanisms have a spectral
+// centroid of 6033 Hz and 6219 Hz, and the replaced build's was 3270 Hz. That
+// comes from high, wide beds plus clicks, so every mechanical band must be
+// centred well above the replaced build's 900-1900 Hz landing points.
+assert.ok(SPEC.ratchet.fromCentre > 4000 && SPEC.ratchet.toCentre > 1500,
+  'the mechanism bed stays bright, as a real one does');
+assert.ok(SPEC.drawerSlide.toCentre > 400, 'the drawer sweep does not drag the "cha" into a rumble');
+
 // 11d. The "ching": every bell partial is a sine at fundamental x ratio; the
-// prime decays with the measured ~0.19 s time constant (a struck bell, not a
+// prime decays with the measured ~0.22 s time constant (a struck bell, not a
 // sustained tone); the low body partials outlast the prime and the bright
 // metallic ones die before it — that spread is what reads as metal.
 const bellOscillators = audioLog.oscillators.filter((osc) => osc.type === 'sine');
@@ -685,11 +716,12 @@ bellOscillators.forEach((osc) => {
 assert.equal(byStart.size, BELL_STRIKES, 'the bell is struck exactly ' + BELL_STRIKES + ' time(s)');
 
 // The measured shape: tau falls as the partial rises, and the prime's own time
-// constant is the 0.168-0.196 s that real register bells were measured at.
+// constant is the ~0.22 s a real register bell was measured at (held a little
+// longer, to 0.28 s, so the ring carries the 1-2 s alert that was asked for).
 const primePartial = SPEC.bellPartials.find((p) => p.ratio === 1);
 assert.ok(primePartial, 'the design names a prime partial');
-assert.ok(primePartial.tau >= 0.13 && primePartial.tau <= 0.28,
-  'the prime time constant matches the measured 0.17-0.20 s of real register bells');
+assert.ok(primePartial.tau >= 0.20 && primePartial.tau <= 0.34,
+  'the prime time constant matches the measured ~0.22 s of a real register bell');
 const byRatio = SPEC.bellPartials.slice().sort((a, b) => a.ratio - b.ratio);
 for (let i = 1; i < byRatio.length; i++) {
   assert.ok(byRatio[i].tau <= byRatio[i - 1].tau + 1e-9,

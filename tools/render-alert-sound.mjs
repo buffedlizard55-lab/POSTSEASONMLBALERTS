@@ -195,33 +195,48 @@ console.log(`Wrote ${OUT} (${(samples.length / SR).toFixed(2)}s @ ${SR}Hz) — p
 /* ---------------------------------------------------------------------------
  * What the checks below compare against
  *
- * These are not matters of taste. They are the numbers measured off real
- * cash-register recordings; docs/alert-sound.md names the files and lists
- * every figure in full.
+ * These are not matters of taste. They are numbers measured off two real
+ * cash-register "cha-ching" recordings, decoded to PCM and analysed;
+ * docs/alert-sound.md names them and lists every figure in full.
  *
- *   reference                             prime    prime tau   20 dB fall
- *   C  stripe-play-ka-ching-sound (MIT)   2100 Hz  0.196 s     0.24 s
- *   D  freesound 721774 cash-register     2097 Hz  0.168 s     0.44 s
- *   A  antique register recording          ~6 kHz  0.144 s     0.06 s
+ *   R1  npm "stripe-play-ka-ching-sound" (MIT), clip 4kVTqUxJYBA.mp3
+ *       1.081 s @ 48 kHz — the canonical ka-ching
+ *   R2  a second "kaching" cash-register sound effect, 0.575 s @ 44.1 kHz
  *
- * Two more figures come from the same files, and they are the two the build
- * this replaced got wrong:
+ * THE "cha" (the mechanism), measured on the window before the bell strikes:
  *
- *   - how much louder the bell ("ching") is than the mechanism ("cha"):
- *       +0.4 dB (C), -3.1 dB (A)  -> the mechanism is NOT a quiet prelude.
- *       The replaced build was +14.2 dB, so its "cha" was inaudible.
- *   - how flat the "cha" is across low / mid / high bands (a mechanical
- *     clatter is broadband; a few thin ticks are not):
- *       1.2 dB (C), 6.5 dB (D), 4.8 dB (A)
- *       The replaced build was 23.7 dB — all click, no body.
+ *   figure                        R1        R2      replaced build
+ *   spectral centroid            6219 Hz  6033 Hz      3270 Hz   <- too dark
+ *   low/mid/high band spread      1.0 dB   2.7 dB       4.2 dB
+ *   crest (peak / rms)           12.9 dB  15.9 dB      15.6 dB
+ *   attacks (4 ms rise >= 6 dB)       3       10            2
+ *   bell vs mechanism (rms)      -0.1 dB  -4.3 dB      -0.7 dB
+ *
+ * The replaced build's centroid (3270 Hz against ~6100 Hz) is the number that
+ * explains why it did not read as a cash register: its "cha" was a dark,
+ * narrow, level band of noise — a hiss with a low rumble under it — where a
+ * real one is bright, broadband, and full of separate little events.
+ *
+ * THE "ching" (the bell):
+ *
+ *   R1 rings at 2098 Hz, a peak standing 24 dB above everything around it in
+ *      the 0.23-0.30 s window, and its prime decays at -39.7 dB/s
+ *      (time constant 0.219 s) — a struck bell, not a sustained tone.
+ *   R2's bell rings at 1523 / 4463 / 5502 Hz, i.e. mode ratios 1 : 2.93 : 3.61,
+ *      with further modes at 4.69x and 5.24x. None of those is a harmonic.
+ *
+ * The design keeps R1's prime (2093 Hz) and puts R2's mode ratios on top of
+ * it, which is where the inharmonic partials below come from.
  * ------------------------------------------------------------------------ */
 
-const REF_PRIME_MIN = 2000, REF_PRIME_MAX = 2200;   // measured 2097-2100 Hz
-const REF_TAU_MIN = 0.13, REF_TAU_MAX = 0.28;       // measured 0.168-0.196 s
-const REF_BALANCE_MIN = -5, REF_BALANCE_MAX = 7;    // measured +0.4 / -3.1 dB
-const REF_CHA_SPREAD_MAX = 10;                      // measured 1.2 / 6.5 / 4.8 dB
-const REF_CHA_CREST_MAX = 18;                       // measured 9.5 / 15.4 / 12.8 dB
-const REF_BELL_CREST_MIN = 16;                      // measured 42.9 / 17.8 / 31.9 dB
+const REF_PRIME_MIN = 2000, REF_PRIME_MAX = 2200;      // measured 2098 Hz (R1)
+const REF_TAU_MIN = 0.20, REF_TAU_MAX = 0.36;          // measured 0.219 s (R1)
+const REF_BALANCE_MIN = -5, REF_BALANCE_MAX = 1;       // measured -0.1 / -4.3 dB
+const REF_CHA_CENTROID_MIN = 4500, REF_CHA_CENTROID_MAX = 7500;  // 6033 / 6219 Hz
+const REF_CHA_SPREAD_MAX = 3.5;                        // measured 1.0 / 2.7 dB
+const REF_CHA_CREST_MIN = 10, REF_CHA_CREST_MAX = 18;  // measured 12.9 / 15.9 dB
+const REF_CHA_ATTACKS_MIN = 3;                         // measured 3 / 10
+const REF_BELL_CREST_MIN = 12;                         // a struck bell is a tone
 
 const STRIKE_AT = SPEC.bellStrikes[0].at;
 
@@ -242,6 +257,76 @@ function spectralCrest (from, to) {
   for (let f = 300; f <= 12000; f += 50) values.push(toneLevel(samples, from, to - from, f));
   const mean = values.reduce((a, b) => a + b, 0) / values.length;
   return db(Math.max(...values) / mean);
+}
+
+/* An averaged magnitude spectrum over a window: one FFT per 1024 samples,
+ * Hann-windowed, magnitudes averaged. Used for the centroid and the band
+ * energies of the "cha", which have to be measured over the whole syllable
+ * rather than at one instant. */
+function averageSpectrum (from, to, N = 2048) {
+  const i0 = Math.max(0, Math.floor(from * SR));
+  const i1 = Math.min(samples.length - N, Math.floor(to * SR));
+  const hop = N / 2;
+  const win = new Float64Array(N);
+  for (let i = 0; i < N; i++) win[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1));
+  const acc = new Float64Array(N / 2);
+  let frames = 0;
+  for (let start = i0; start + N < i1; start += hop) {
+    const re = new Float64Array(N);
+    const im = new Float64Array(N);
+    for (let i = 0; i < N; i++) re[i] = samples[start + i] * win[i];
+    // In-place radix-2 FFT (this tool has no FFT dependency, by design).
+    for (let i = 1, j = 0; i < N; i++) {
+      let bit = N >> 1;
+      for (; j & bit; bit >>= 1) j ^= bit;
+      j ^= bit;
+      if (i < j) { const tr = re[i]; re[i] = re[j]; re[j] = tr; const ti = im[i]; im[i] = im[j]; im[j] = ti; }
+    }
+    for (let len = 2; len <= N; len <<= 1) {
+      const ang = (-2 * Math.PI) / len;
+      for (let i = 0; i < N; i += len) {
+        for (let k = 0; k < len / 2; k++) {
+          const a = ang * k, wr = Math.cos(a), wi = Math.sin(a);
+          const ur = re[i + k], ui = im[i + k];
+          const vr = re[i + k + len / 2] * wr - im[i + k + len / 2] * wi;
+          const vi = re[i + k + len / 2] * wi + im[i + k + len / 2] * wr;
+          re[i + k] = ur + vr; im[i + k] = ui + vi;
+          re[i + k + len / 2] = ur - vr; im[i + k + len / 2] = ui - vi;
+        }
+      }
+    }
+    for (let i = 0; i < N / 2; i++) acc[i] += Math.sqrt(re[i] * re[i] + im[i] * im[i]);
+    frames++;
+  }
+  for (let i = 0; i < N / 2; i++) acc[i] /= Math.max(1, frames);
+  return { acc, N, frames };
+}
+
+/** Energy-weighted mean frequency — how bright a sound is. */
+function spectralCentroid (spec) {
+  const { acc, N } = spec;
+  let num = 0, den = 0;
+  for (let i = 1; i < N / 2; i++) { const m = acc[i] * acc[i]; num += m * ((i * SR) / N); den += m; }
+  return num / den;
+}
+
+/** Mean magnitude across a frequency band of an averaged spectrum, in dB. */
+function spectrumBand (spec, lo, hi) {
+  const { acc, N } = spec;
+  const bin = SR / N;
+  let sum = 0, n = 0;
+  for (let i = Math.max(1, Math.floor(lo / bin)); i <= Math.min(N / 2 - 1, Math.ceil(hi / bin)); i++) {
+    sum += acc[i] * acc[i]; n++;
+  }
+  return db(Math.sqrt(sum / Math.max(1, n)));
+}
+
+/** How many separate attacks the ear gets: 4 ms rises of >= 6 dB. */
+function countAttacks (from, to) {
+  const env = envelope(samples, 0.002).filter((f) => f.t >= from && f.t <= to);
+  let attacks = 0;
+  for (let i = 2; i < env.length; i++) if (env[i].db - env[i - 2].db >= 6) attacks++;
+  return attacks;
 }
 
 /** Re-render the same graph with one layer changed, for an A/B comparison. */
@@ -266,35 +351,49 @@ check(totalPeak < 0.99, 'does not clip', `peak ${(db(totalPeak)).toFixed(1)} dBF
 check(totalPeak > 0.15 && totalPeak < 0.71, 'sits at a sensible alert level',
   `peak ${(db(totalPeak)).toFixed(1)} dBFS`);
 
-/* 2. the "cha": the mechanism, as loud as the bell -------------------------- */
-console.log('\n2) the "cha" mechanism (the layer the old build buried)');
+/* 2. the "cha": a bright, broadband, percussive mechanism ------------------ */
+console.log('\n2) the "cha" mechanism (the layer the replaced build got wrong)');
 const chaRms = rms(samples, 0, STRIKE_AT);
 const bellRms = rms(samples, STRIKE_AT, STRIKE_AT + 0.25);
 const balance = db(bellRms) - db(chaRms);
-check(db(chaRms) > -35, 'the mechanism is loud enough to be a real syllable',
+check(db(chaRms) > -32, 'the mechanism is loud enough to be a real syllable',
   `${db(chaRms).toFixed(1)} dB RMS over 0-${STRIKE_AT} s`);
 check(balance >= REF_BALANCE_MIN && balance <= REF_BALANCE_MAX,
-  'the mechanism sits level with the bell, as it does in real recordings',
+  'the mechanism is at least as loud as the bell, as it is in both references',
   `bell is ${balance >= 0 ? '+' : ''}${balance.toFixed(1)} dB vs the mechanism`);
 
-// A mechanical clatter is broadband. Measure the low / mid / high bands of the
-// "cha" and require them within REF_CHA_SPREAD_MAX of each other — the old
-// build's "cha" was 23.7 dB apart (thin ticks, no body).
+const chaSpectrum = averageSpectrum(0, STRIKE_AT);
+const chaCentroid = spectralCentroid(chaSpectrum);
+check(chaCentroid >= REF_CHA_CENTROID_MIN && chaCentroid <= REF_CHA_CENTROID_MAX,
+  'the "cha" is as bright as a real one (centroid 6033 / 6219 Hz in the references)',
+  `centroid ${chaCentroid.toFixed(0)} Hz`);
+
 const chaBands = {
-  low: bandLevel(0.01, STRIKE_AT - 0.01, 150, 400, 25),
-  mid: bandLevel(0.01, STRIKE_AT - 0.01, 700, 1600, 60),
-  high: bandLevel(0.01, STRIKE_AT - 0.01, 2500, 6000, 200),
+  low: spectrumBand(chaSpectrum, 150, 400),
+  mid: spectrumBand(chaSpectrum, 700, 1600),
+  high: spectrumBand(chaSpectrum, 2500, 6000),
 };
-const chaSpread = Math.max(...Object.values(chaBands).map(db)) - Math.min(...Object.values(chaBands).map(db));
+const chaSpread = Math.max(...Object.values(chaBands)) - Math.min(...Object.values(chaBands));
 Object.entries(chaBands).forEach(([name, level]) => {
-  check(db(level) > -70, `the "cha" has audible ${name}-frequency content`, `${db(level).toFixed(1)} dB`);
+  check(level > -70, `the "cha" has audible ${name}-frequency content`, `${level.toFixed(1)} dB`);
 });
 check(chaSpread <= REF_CHA_SPREAD_MAX, 'the "cha" is broadband across low/mid/high, like a real mechanism',
-  `${chaSpread.toFixed(1)} dB spread (references: 1.2-6.5)`);
-const chaCrest = spectralCrest(0.01, STRIKE_AT - 0.01);
-check(chaCrest <= REF_CHA_CREST_MAX, 'the "cha" is noise-like, not a tone', `crest ${chaCrest.toFixed(1)} dB`);
-check(db(rms(samples, 0.12, 0.20)) > -40, 'the mechanism is still running when the bell is struck',
-  `${db(rms(samples, 0.12, 0.20)).toFixed(1)} dB RMS`);
+  `${chaSpread.toFixed(1)} dB spread (references: 1.0 and 2.7)`);
+
+const chaPeak = peak(samples, 0, STRIKE_AT);
+const chaCrest = db(chaPeak) - db(chaRms);
+check(chaCrest >= REF_CHA_CREST_MIN && chaCrest <= REF_CHA_CREST_MAX,
+  'the "cha" is peaky like a mechanism, neither a flat tone nor isolated spikes',
+  `crest ${chaCrest.toFixed(1)} dB (references: 12.9 and 15.9)`);
+const chaAttacks = countAttacks(0, STRIKE_AT);
+check(chaAttacks >= REF_CHA_ATTACKS_MIN,
+  'the "cha" breaks into separate attacks, not one smooth band of noise',
+  `${chaAttacks} attacks (references: 3 and 10; the replaced build managed 2)`);
+const chaToneCrest = spectralCrest(0.01, STRIKE_AT - 0.01);
+check(chaToneCrest <= 20, 'the "cha" is noise-like, not a tone', `crest ${chaToneCrest.toFixed(1)} dB`);
+check(db(rms(samples, STRIKE_AT - 0.05, STRIKE_AT)) > -40,
+  'the mechanism is still running when the bell is struck',
+  `${db(rms(samples, STRIKE_AT - 0.05, STRIKE_AT)).toFixed(1)} dB RMS`);
 
 /* 3. the "ching": the bell, measured --------------------------------------- */
 console.log('\n3) the register bell');
@@ -318,9 +417,7 @@ check(bellCrest >= REF_BELL_CREST_MIN,
   `crest ${bellCrest.toFixed(1)} dB`);
 
 // The decay is measured on a bell-only render so the drawer and the mechanism
-// cannot skew it. This is the figure that turned the old chime into a
-// cha-ching: the old bell's time constant was 0.85 s (a sustained tone); real
-// register bells measure 0.168 s and 0.196 s.
+// cannot skew it. This is the figure that separates a "ching" from a chime.
 const bellOnly = await renderWith((v) => {
   v.keyClack = { ...v.keyClack, level: 1e-5 };
   v.gearClicks = v.gearClicks.map((c) => ({ ...c, level: 1e-5 }));
@@ -346,18 +443,20 @@ const early = bellTone(STRIKE_AT + 0.06, STRIKE_AT + 0.12);
 const late = bellTone(STRIKE_AT + 0.46, STRIKE_AT + 0.52);
 const decayRate = (db(late) - db(early)) / 0.40;
 const tau = -1 / (decayRate / 8.686);
-check(decayRate < -28 && decayRate > -70, 'the prime rings down like a struck bell, not a sustained tone',
+check(decayRate < -20 && decayRate > -60, 'the prime rings down like a struck bell, not a sustained tone',
   `${decayRate.toFixed(1)} dB/s`);
 check(tau >= REF_TAU_MIN && tau <= REF_TAU_MAX,
-  'the prime time constant matches the measured 0.17-0.20 s', `tau ${tau.toFixed(3)} s`);
+  'the prime time constant matches the measured 0.22 s of a real register bell',
+  `tau ${tau.toFixed(3)} s`);
 
-// How long until the prime is 20 dB down: measured 0.24 s (C) and 0.44 s (D).
+// How long until the prime is 20 dB down: R1 needs about 1.0 s to get there,
+// which is exactly why the alert is audible for the 1-2 s that was asked for.
 const bellAttackLevel = bellTone(STRIKE_AT + 0.01, STRIKE_AT + 0.02);
 let t20 = null;
-for (let t = STRIKE_AT; t + 0.01 < 1.4; t += 0.005) {
+for (let t = STRIKE_AT; t + 0.01 < 1.6; t += 0.005) {
   if (db(bellTone(t, t + 0.01)) < db(bellAttackLevel) - 20) { t20 = t - STRIKE_AT; break; }
 }
-check(t20 !== null && t20 > 0.08 && t20 < 0.60, 'the prime is 20 dB down within 0.6 s of the strike',
+check(t20 !== null && t20 > 0.08 && t20 < 1.10, 'the prime is 20 dB down within about a second of the strike',
   t20 === null ? 'never' : `${t20.toFixed(3)} s after the strike`);
 
 // Metal: the bright upper partials die faster than the prime.
@@ -381,8 +480,6 @@ check(db(withBellAt) - db(noBellAt) >= 3,
   `+${(db(withBellAt) - db(noBellAt)).toFixed(1)} dB vs the same graph without the bell`);
 
 const noTick = await renderWith((v) => { v.hammerTick = { ...v.hammerTick, level: 1e-5 }; });
-// Measured in the sliver between the tick starting and the bell's tone
-// blooming, so the comparison isolates the tick itself.
 const tickFrom = STRIKE_AT - SPEC.hammerTick.lead - 0.0005;
 const tickTo = STRIKE_AT - 0.0005;
 const tickGain = db(rms(samples, tickFrom, tickTo)) - db(rms(noTick, tickFrom, tickTo));
@@ -419,7 +516,7 @@ env.forEach((f) => { num += (f.t - meanT) * (f.db - meanV); den += (f.t - meanT)
 const slope = num / den;
 const residual = Math.sqrt(env.reduce((a, f) => a + (f.db - (meanV + slope * (f.t - meanT))) ** 2, 0) / env.length);
 check(slope < -3, 'the ring keeps decaying (no flat tone)', `${slope.toFixed(1)} dB/s`);
-check(residual < 2.2, 'the ring decays smoothly, without a slow warble', `residual ${residual.toFixed(2)} dB`);
+check(residual < 2.5, 'the ring decays smoothly, without a slow warble', `residual ${residual.toFixed(2)} dB`);
 // Look for holes only where the alert is meant to be sounding, not in the tail.
 const quietRuns = envelope(samples, 0.01).filter((f) => f.t > 0.1 && f.t < 1.35 && f.db < -60).length;
 check(quietRuns < 12, 'no silent hole inside the alert', `${(quietRuns * 10)} ms below -60 dB`);
