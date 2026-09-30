@@ -2316,9 +2316,9 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
   }
 
   /**
-   * Synthesize a short cash-register "cha-ching": two mechanical clacks,
-   * followed by a pair of rising, metallic bell notes. The master envelope
-   * fades to silence after 1.6 seconds, including the full bell decay.
+   * Synthesize a short cash-register "cha-ching": two quick mechanism clicks,
+   * a pair of rising metallic bell strikes, then the drawer opening clunk.
+   * The master envelope fades to silence after 1.6 seconds, including the full bell decay.
    */
   function playCashRegisterChime() {
     try {
@@ -2337,11 +2337,12 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
       master.gain.linearRampToValueAtTime(0, t0 + SOUND_END);
       master.connect(ctx.destination);
 
-      // "Cha": a pair of brief, band-passed noise bursts like a register key
-      // and drawer mechanism. The second click is quieter and follows closely.
+      // "Cha": quick key/release clicks; after the bells, the lower, longer
+      // drawer clunk completes the recognizable mechanical register sequence.
       const clacks = [
         { at: 0, duration: 0.045, frequency: 1450, level: 0.18 },
         { at: 0.055, duration: 0.04, frequency: 2350, level: 0.11 },
+        { at: 0.43, duration: 0.09, frequency: 520, level: 0.28 },
       ];
       clacks.forEach((clack) => {
         const sampleCount = Math.ceil(ctx.sampleRate * clack.duration);
