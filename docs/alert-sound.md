@@ -172,11 +172,23 @@ PCM. Latest run, on the shipped code:
 The tool exits 0 with a "not installed" notice when `web-audio-engine` is
 absent, so the CI smoke suite (which installs nothing) is never affected.
 
-A separate band/FFT analysis of the same rendered WAV, run with independent
-Python tooling, agrees on every point: audible to 1.94 s, peak −8.4 dBFS, bell
-prime and all 11 partials present, ring decay −12.7 dB/s with a 0.67 dB
-residual, a re-excitation of the ring at the second tap, and no gap longer than
-0 ms inside the sound.
+A separate band analysis of the same rendered WAV agrees on every point:
+audible to 1.94 s, peak −8.4 dBFS, bell prime and all 11 partials present,
+ring decay −12.7 dB/s with a 0.67 dB residual, a re-excitation of the ring at
+the second tap, and no gap longer than 0 ms inside the sound. That cross-check
+is committed and re-runnable:
+
+```bash
+node tools/alert-sound-independent-check.mjs alert-sound.wav
+```
+
+It shares **no code** with the render tool (own WAV parser from the RIFF spec,
+own Hann-windowed Goertzel detector, own clustering) and re-measures 10
+independent facts: the 1–2 s duration, no clipping, mechanism-before-bell
+order, the bell window louder than the mechanism, the +3.8 dB re-excitation at
+the second tap, the bell prime in the ~2.1 kHz region, inharmonic partials,
+and the upper partials dying faster than the prime — the struck-metal
+signature. Latest run: 10/10.
 
 ### 3c. What the previous sound was
 
