@@ -2,7 +2,7 @@
 
 **Live MLB alert feed for every tracked event — manager challenges, crew-chief/umpire reviews, boundary calls, ABS pitch challenges, official-scorer pending rulings and official scoring changes — all in one complete "All" feed, with chime alerts and live tracking.**
 
-A copy of [MLB-Live-PBP](https://buffedlizard55-lab.github.io/MLB-Live-PBP/reviews.html) with two intentional differences: **ABS pitch challenges are included in the "All" feed, alert system, and live tracking** (upstream excludes them from All/alerts during the regular season to limit volume), and the alert sound is a synthesized 1.6-second cha-ching cash-register sound. Other behavior remains aligned with upstream.
+A copy of [MLB-Live-PBP](https://buffedlizard55-lab.github.io/MLB-Live-PBP/reviews.html) with two intentional differences: **ABS pitch challenges are included in the "All" feed, alert system, and live tracking** (upstream excludes them from All/alerts during the regular season to limit volume), and the alert sound is a synthesized ~2-second cha-ching cash-register ring-up (lever/keys, drawer, and a double-struck metal bell) — see [`docs/alert-sound.md`](docs/alert-sound.md). Other behavior remains aligned with upstream.
 
 ---
 
@@ -10,7 +10,7 @@ A copy of [MLB-Live-PBP](https://buffedlizard55-lab.github.io/MLB-Live-PBP/revie
 
 > This block is the standing source of truth for what we are building. Re-read it before every session so every change, suggestion and upgrade stays anchored to it.
 >
-> **Goal.** Copy the MLB-Live-PBP repo and site (https://buffedlizard55-lab.github.io/MLB-Live-PBP/reviews.html). The feed change is that all tracked alerts appear in the All feed, including ABS challenges that upstream excludes during the regular season. A later sound customization request changed the alert audio to a synthesized 1.6-second cha-ching cash-register sound; alert categories, timing, and other behavior remain unchanged.
+> **Goal.** Copy the MLB-Live-PBP repo and site (https://buffedlizard55-lab.github.io/MLB-Live-PBP/reviews.html). The feed change is that all tracked alerts appear in the All feed, including ABS challenges that upstream excludes during the regular season. A sound customization request changed the alert audio to a synthesized cha-ching cash-register sound (researched and measured: lever/key clicks, a drawer opening, and a bright inharmonic bell struck twice, ringing for ~2 seconds); alert categories, timing, and other behavior remain unchanged. Full record: [`docs/alert-sound.md`](docs/alert-sound.md).
 >
 > **Why.** It should solve the problem of having to manually check everything ourselves — one up-to-date, current feed that shows what is happening across the whole slate without hunting.
 >
@@ -56,7 +56,7 @@ Pages: **Scoreboard** (`index.html`), **Game** (`game.html?gamePk=…` — live 
 
 ## Intentional differences vs. MLB-Live-PBP
 
-Upstream keeps ABS pitch challenges out of the "All" feed and out of the audio-alert gate (`shouldAlertForReview` / `visibleInAllFeed` return false only for `typeKey === 'abs'`) so a full regular season of routine ABS challenges doesn't flood the feed. This build includes ABS in All, the Events stat, alerts, and live tracking; it also uses the requested 1.6-second cha-ching cash-register sound for alerts. The dedicated ABS tab, ABS stat and official challenges-remaining counters remain alongside All. Full line-by-line ABS inclusion record: [`docs/abs-inclusion.md`](docs/abs-inclusion.md).
+Upstream keeps ABS pitch challenges out of the "All" feed and out of the audio-alert gate (`shouldAlertForReview` / `visibleInAllFeed` return false only for `typeKey === 'abs'`) so a full regular season of routine ABS challenges doesn't flood the feed. This build includes ABS in All, the Events stat, alerts, and live tracking; it also uses the requested cha-ching cash-register sound for alerts (see [`docs/alert-sound.md`](docs/alert-sound.md)). The dedicated ABS tab, ABS stat and official challenges-remaining counters remain alongside All. Full line-by-line ABS inclusion record: [`docs/abs-inclusion.md`](docs/abs-inclusion.md).
 
 ## Sources (all verified live 2026-09-29)
 
