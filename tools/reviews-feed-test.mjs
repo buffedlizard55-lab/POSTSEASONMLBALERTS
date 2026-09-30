@@ -26,7 +26,7 @@ class FakeDate extends Date {
 
 /* Recording stub for the Web Audio graph (filled in below, used by the
  * audio-alert section at the end of this file). */
-const audioLog = { oscillators: [], edges: [], resumes: 0, ctx: null };
+const audioLog = { oscillators: [], sources: [], buffers: [], gains: [], edges: [], resumes: 0, ctx: null };
 
 function stubAudioParam(events) {
   return {
@@ -55,6 +55,7 @@ class StubAudioContext {
   constructor() {
     this.state = 'running';
     this.currentTime = 100;
+    this.sampleRate = 48000;
     this.destination = stubAudioNode('destination');
     audioLog.ctx = this;
   }
@@ -62,6 +63,28 @@ class StubAudioContext {
   createGain() {
     const n = stubAudioNode('gain');
     n.gain = stubAudioParam((n._gainEvents = []));
+    audioLog.gains.push(n);
+    return n;
+  }
+  createBuffer(channels, length, sampleRate) {
+    const buffer = {
+      numberOfChannels: channels,
+      length,
+      sampleRate,
+      getChannelData(channel) {
+        assert.equal(channel, 0);
+        return this.channelData;
+      },
+      channelData: new Float32Array(length),
+    };
+    audioLog.buffers.push(buffer);
+    return buffer;
+  }
+  createBufferSource() {
+    const n = stubAudioNode('bufferSource');
+    n.buffer = null;
+    n.start = (t) => { n.startedAt = t; audioLog.sources.push(n); };
+    n.stop = (t) => { n.stoppedAt = t; };
     return n;
   }
   createOscillator() {
@@ -82,6 +105,7 @@ class StubAudioContext {
   createBiquadFilter() {
     const n = stubAudioNode('filter', { type: null });
     n.frequency = stubAudioParam((n._freqEvents = []));
+    n.Q = { value: 0 };
     return n;
   }
 }
@@ -529,16 +553,12 @@ assert.equal(visibleInAllFeed(undefined), true);
 assert.equal(visibleInAllFeed({}), true);
 assert.equal(visibleInAllFeed({ typeKey: 42 }), true);
 
-/* ---------------------- 11. Audio alert is a gentle raindrop chime
+/* ---------------------- 11. Audio alert is a cash-register cha-ching
  *
- * Drives window.ReplayFeed against a recording AudioContext stub and
- * verifies the graph the code actually builds:
- *   - silence while the toggle is off; preview plays once when enabled
- *   - every oscillator is an explicitly-set sine (no square/sawtooth buzz)
- *   - three pitch-drop "raindrop" voices + a soft chime tail
- *   - per-voice levels stay gentle (≤ 0.3) and envelopes end cleanly
- *   - the 2.5s cooldown blocks an immediate repeat and admits one after it
- *   - a suspended context is resumed before playing
+ * Drives window.ReplayFeed against a recording AudioContext stub and verifies
+ * the real sound graph: two filtered mechanical clicks, two rising metallic
+ * notes, a 1.6-second master envelope, silence while muted, and the unchanged
+ * cooldown / suspended-context behavior.
  */
 
 const ReplayFeed = context.window.ReplayFeed;
@@ -548,64 +568,77 @@ assert.ok(ReplayFeed, 'window.ReplayFeed API is exported');
 assert.equal(ReplayFeed.getSoundEnabled(), false);
 ReplayFeed.playAlertSound();
 assert.equal(audioLog.oscillators.length, 0, 'no sound while the toggle is off');
+assert.equal(audioLog.sources.length, 0, 'no mechanical click while the toggle is off');
 
 // 11b. Enabling plays exactly one preview alert (the user-gesture path).
 ReplayFeed.setSoundEnabled(true);
 assert.equal(ReplayFeed.getSoundEnabled(), true);
 const previewCount = audioLog.oscillators.length;
-assert.ok(previewCount > 0, 'enabling the toggle plays a preview');
+assert.equal(previewCount, 8, 'two struck notes each use four metallic partials');
+assert.equal(audioLog.sources.length, 2, 'the cha is a pair of mechanical noise clicks');
 
-// 11c. Every oscillator is an explicitly-set pure sine — no buzz timbres.
+// 11c. The register clacks use real, short noise buffers and occur first.
+assert.equal(audioLog.buffers.length, 2);
+audioLog.sources.forEach((source, index) => {
+  assert.equal(source._kind, 'bufferSource');
+  assert.ok(source.buffer.length > 0, 'each clack has an audio buffer');
+  assert.ok(source.buffer.channelData.some((sample) => sample !== 0), 'noise buffer is non-silent');
+  assert.ok(source.startedAt < audioLog.oscillators[0].startedAt,
+    'mechanical cha precedes the metallic ching');
+  assert.ok(source.stoppedAt > source.startedAt, 'clack source has a finite positive duration');
+  assert.ok(source.stoppedAt - source.startedAt <= 0.05, 'each clack is brief');
+  if (index > 0) assert.ok(source.startedAt > audioLog.sources[index - 1].startedAt,
+    'the second clack follows the first');
+});
+
+// 11d. The ching consists of two notes, with the second at a higher pitch.
 audioLog.oscillators.forEach((osc) => {
-  assert.equal(osc.type, 'sine', 'alert must use sine oscillators only (soft timbre)');
+  assert.equal(osc.type, 'sine', 'metallic partials use sine oscillators');
   assert.ok(Number.isFinite(osc.startedAt) && Number.isFinite(osc.stoppedAt), 'oscillator has start/stop');
   assert.ok(osc.stoppedAt > osc.startedAt, 'oscillator stop is after start');
-});
-
-// 11d. Voice mix: 3 pitch-drop raindrops (exponential high→low sweep) + 2
-//     steady-pitch chime partials = the recognizable gentle motif.
-const drops = audioLog.oscillators.filter((o) => o._freqEvents.some((e) => e.kind === 'exp'));
-const chimes = audioLog.oscillators.filter((o) => !o._freqEvents.some((e) => e.kind === 'exp'));
-assert.equal(drops.length, 3, 'exactly three raindrop voices');
-assert.equal(chimes.length, 2, 'exactly two chime partials');
-drops.forEach((o) => {
-  const from = o._freqEvents.find((e) => e.kind === 'set').v;
-  const to = o._freqEvents.find((e) => e.kind === 'exp').v;
-  assert.ok(from > to && to > 0, `raindrop sweeps high→low (${from}→${to} Hz)`);
-});
-// The drops ascend (rising plip-plop-ploop motif = clearly an alert).
-const dropFroms = drops.map((o) => o._freqEvents.find((e) => e.kind === 'set').v);
-assert.ok(dropFroms[0] < dropFroms[1] && dropFroms[1] < dropFroms[2],
-  `raindrops ascend (${dropFroms.join(' → ')} Hz)`);
-
-// 11e. Gentle levels + clean envelopes on every oscillator's gain node.
-audioLog.oscillators.forEach((osc) => {
   const edge = audioLog.edges.find(([src]) => src === osc);
   assert.ok(edge, 'each oscillator connects into a gain node');
   const voiceGain = edge[1];
   assert.equal(voiceGain._kind, 'gain');
-  const peaks = voiceGain._gainEvents.map((e) => e.v).filter((v) => v > 0);
+  const peaks = voiceGain._gainEvents.map((event) => event.v).filter((value) => value > 0);
   assert.ok(peaks.length, 'voice gain is automated');
-  assert.ok(Math.max(...peaks) <= 0.3, `voice level is gentle (peak ${Math.max(...peaks)})`);
-  const kinds = voiceGain._gainEvents.map((e) => e.kind).join(',');
-  assert.ok(kinds.includes('lin') && kinds.includes('exp'),
-    'voice envelope has a fast attack and an exponential (natural) decay');
+  assert.ok(Math.max(...peaks) <= 0.17, 'metallic partials have bounded levels');
+  const kinds = voiceGain._gainEvents.map((event) => event.kind).join(',');
+  assert.ok(kinds.includes('lin') && kinds.includes('exp'), 'bell notes attack and naturally decay');
 });
+const firstNote = audioLog.oscillators.filter((osc) => Math.abs(osc.startedAt - 100.16) < 1e-9);
+const secondNote = audioLog.oscillators.filter((osc) => Math.abs(osc.startedAt - 100.30) < 1e-9);
+assert.equal(firstNote.length, 4, 'first ching note has four bell partials');
+assert.equal(secondNote.length, 4, 'second ching note has four bell partials');
+assert.ok(secondNote[0].frequency.value > firstNote[0].frequency.value,
+  'the second ching note rises in pitch');
+
+// 11e. Verify the alert's actual master envelope lasts 1.6 seconds.
+const masterEdge = audioLog.edges.find(([, target]) => target._kind === 'destination');
+assert.ok(masterEdge, 'the master gain connects to the audio destination');
+const masterEvents = masterEdge[0]._gainEvents;
+const masterEnd = masterEvents.find((event) => event.kind === 'lin' && event.v === 0);
+assert.ok(masterEnd, 'the master envelope fades fully to silence');
+assert.equal(Number((masterEnd.t - 100).toFixed(3)), 1.6,
+  'the complete cash-register alert lasts 1.6 seconds');
 
 // 11f. The 2.5s cooldown: an immediate repeat is suppressed…
 ReplayFeed.playAlertSound();
 assert.equal(audioLog.oscillators.length, previewCount, 'cooldown blocks an immediate repeat');
+assert.equal(audioLog.sources.length, 2, 'cooldown also suppresses the mechanical clicks');
 // …and after the cooldown a new alert plays.
 clockOffsetMs = 3000;
 audioLog.ctx.state = 'suspended';
 ReplayFeed.playAlertSound();
 assert.equal(audioLog.oscillators.length, previewCount * 2, 'alert plays again after the cooldown');
+assert.equal(audioLog.sources.length, 4, 'the second alert includes both clicks');
 assert.ok(audioLog.resumes >= 1, 'a suspended AudioContext is resumed before playing');
 
 // 11g. Disabling silences it again (and no preview on mute).
 ReplayFeed.setSoundEnabled(false);
 assert.equal(ReplayFeed.getSoundEnabled(), false);
 assert.equal(audioLog.oscillators.length, previewCount * 2, 'muting plays nothing');
+assert.equal(audioLog.sources.length, 4, 'muting plays no clicks');
 
 /* ------------------------- 12. Run-at-risk detection (the ASAP alert)
  *
@@ -740,77 +773,85 @@ assert.deepEqual([...diffRunRiskKeys(['1:play-5-main'], [
   entryOf(1, { ...activeOneRun, id: 'play-5-main' }),
 ], keyOf).started], []);
 
-/* ------------- 14. The run-at-risk alert IS the same raindrop chime
+/* ------------- 14. Run-at-risk uses the same cash-register cha-ching
  *
- * By request the run-at-risk alert uses the ordinary review chime rather than
- * a separate urgent voice. These assertions pin that: the two entry points
- * must build an identical audio graph and share one cooldown, so they can
- * never drift into two different sounds.
+ * Both alert paths must build the same sound graph and share the existing
+ * cooldown, so a run-at-risk review cannot introduce a second sound.
  */
 
-/** Snapshot the voice graph the recording stub just captured. */
-function captureVoices() {
-  return audioLog.oscillators.map((osc) => {
-    const edge = audioLog.edges.find(([src]) => src === osc);
-    assert.ok(edge, 'each oscillator connects into a gain node');
+function captureAlertGraph() {
+  const voices = audioLog.oscillators.map((osc) => {
+    const edge = audioLog.edges.find(([source]) => source === osc);
+    assert.ok(edge, 'each bell partial connects into a gain node');
     return {
       type: osc.type,
-      // Include the scheduled TIMES, not just the values, so two graphs only
-      // compare equal when the rhythm is identical too.
-      freq: osc._freqEvents.map((e) => `${e.kind}@${e.v}t${e.t}`).join(','),
-      gain: edge[1]._gainEvents.map((e) => `${e.kind}@${e.v}t${e.t}`).join(','),
+      frequency: osc.frequency.value,
+      gain: edge[1]._gainEvents.map((event) => `${event.kind}@${event.v}t${event.t}`).join(','),
       start: osc.startedAt,
-      dur: Number((osc.stoppedAt - osc.startedAt).toFixed(6)),
+      stop: osc.stoppedAt,
     };
   });
+  const clacks = audioLog.sources.map((source) => ({
+    start: source.startedAt,
+    stop: source.stoppedAt,
+    length: source.buffer.length,
+  }));
+  const masterEdge = audioLog.edges.find(([, target]) => target._kind === 'destination');
+  assert.ok(masterEdge, 'the sound has a master gain connected to the destination');
+  const master = masterEdge[0]._gainEvents.map((event) => `${event.kind}@${event.v}t${event.t}`).join(',');
+  return { voices, clacks, master };
 }
 
-audioLog.oscillators.length = 0;
-audioLog.edges.length = 0;
+function resetAudioLog() {
+  audioLog.oscillators.length = 0;
+  audioLog.sources.length = 0;
+  audioLog.buffers.length = 0;
+  audioLog.gains.length = 0;
+  audioLog.edges.length = 0;
+}
+
+resetAudioLog();
 clockOffsetMs = 60000;
 audioLog.ctx.state = 'running';
 
-// 14a. Silent while muted, exactly like the chime.
+// 14a. Silent while muted, exactly like the ordinary alert.
 ReplayFeed.playRunRiskAlertSound();
 assert.equal(audioLog.oscillators.length, 0, 'no run-at-risk alert while the toggle is off');
+assert.equal(audioLog.sources.length, 0, 'no register clacks while the toggle is off');
 
-// 14b. Capture the ordinary chime (the preview fired by enabling sound).
+// 14b. Capture the ordinary alert played when sound is enabled.
 ReplayFeed.setSoundEnabled(true);
-const chimeVoices = captureVoices();
-assert.equal(chimeVoices.length, 5, 'the chime is the 3-drop + 2-partial motif');
+const ordinaryAlert = captureAlertGraph();
+assert.equal(ordinaryAlert.voices.length, 8, 'ordinary alert has eight bell partials');
+assert.equal(ordinaryAlert.clacks.length, 2, 'ordinary alert has two mechanical clacks');
 
-// 14c. Capture the run-at-risk alert and compare it voice for voice.
-audioLog.oscillators.length = 0;
-audioLog.edges.length = 0;
+// 14c. Capture run-at-risk playback and compare the whole scheduled graph.
+resetAudioLog();
 clockOffsetMs = 120000;
 ReplayFeed.playRunRiskAlertSound();
-const runRiskVoices = captureVoices();
-assert.ok(runRiskVoices.length > 0, 'the run-at-risk alert plays when sound is on');
-assert.deepEqual(runRiskVoices, chimeVoices,
-  'the run-at-risk alert must be the SAME raindrop chime, voice for voice');
+const runRiskAlert = captureAlertGraph();
+assert.deepEqual(runRiskAlert, ordinaryAlert,
+  'run-at-risk must use the exact same cash-register sound and timings');
 
-// Belt and braces: it still satisfies every property the chime is held to.
-assert.equal(runRiskVoices.length, 5);
-runRiskVoices.forEach((v) => assert.equal(v.type, 'sine', 'sine-only, no buzz'));
-assert.equal(runRiskVoices.filter((v) => v.freq.includes('exp@')).length, 3,
-  'three raindrop pitch-sweeps, same as the chime');
-assert.equal(runRiskVoices.filter((v) => !v.freq.includes('exp@')).length, 2,
-  'two steady chime partials, same as the chime');
-const runRiskPeaks = runRiskVoices.flatMap((v) => v.gain.split(',')
-  .map((e) => Number(e.split('@')[1])).filter((n) => n > 0));
-assert.ok(Math.max(...runRiskPeaks) <= 0.3,
-  `run-at-risk alert stays at the gentle chime level (peak ${Math.max(...runRiskPeaks)})`);
+// The signature remains two ascending struck notes with the same 1.6s envelope.
+assert.equal(runRiskAlert.voices.length, 8);
+runRiskAlert.voices.forEach((voice) => assert.equal(voice.type, 'sine'));
+const fundamentals = runRiskAlert.voices.filter((voice) => [1046.5, 1318.5].includes(voice.frequency));
+assert.equal(fundamentals.length, 2, 'the rising C6-to-E6 fundamentals are present');
+assert.ok(fundamentals[1].frequency > fundamentals[0].frequency);
+assert.ok(runRiskAlert.master.includes('lin@0t101.6'), 'the master envelope ends at 1.6 seconds');
 
-// 14d. ONE shared cooldown — the same sound must never chime on top of itself.
-audioLog.oscillators.length = 0;
+// 14d. ONE shared cooldown — the same sound must never overlap itself.
+resetAudioLog();
 ReplayFeed.playAlertSound();
 assert.equal(audioLog.oscillators.length, 0,
-  'the ordinary chime is blocked by the run-at-risk alert that just played');
+  'ordinary alert is blocked by the run-at-risk alert that just played');
 ReplayFeed.playRunRiskAlertSound();
-assert.equal(audioLog.oscillators.length, 0, 'and so is an immediate run-at-risk repeat');
+assert.equal(audioLog.oscillators.length, 0, 'an immediate run-at-risk repeat is blocked');
 clockOffsetMs = 130000;
 ReplayFeed.playRunRiskAlertSound();
-assert.equal(audioLog.oscillators.length, 5, 'it plays again after the shared 2.5s cooldown');
+assert.equal(audioLog.oscillators.length, 8, 'it plays again after the shared 2.5s cooldown');
+assert.equal(audioLog.sources.length, 2, 'the repeat includes both mechanical clacks');
 
 // 14e. A suspended context is resumed before the run-at-risk alert plays.
 const resumesBefore = audioLog.resumes;

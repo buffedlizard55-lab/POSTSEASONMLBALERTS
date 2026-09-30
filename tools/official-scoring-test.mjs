@@ -318,7 +318,7 @@ assert.equal(resolvedFeed.playsByAtBatIndex.get('10'), resolvedPrimaryPlay,
 /* -------------------- 5. Feed semantics: alert, visibility, no run risk */
 
 assert.equal(shouldAlertForReview(pend), true,
-  'an official-scorer pending ruling triggers the raindrop chime');
+  'an official-scorer pending ruling triggers the cha-ching cash-register alert');
 assert.equal(visibleInAllFeed(pend), true,
   'pending rulings appear in the All section of the Replay Feed');
 assert.equal(runsRemovableFromReview(pend), 0,

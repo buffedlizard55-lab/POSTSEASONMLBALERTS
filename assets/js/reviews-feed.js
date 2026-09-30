@@ -2302,115 +2302,104 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
   }
 
   /**
-   * Play a soft "cha-ching cash register sound" alert for challenges/reviews/boundary calls.
-   * Uses Web Audio API (no external file) so it works on static hosting.
-   *
-   * Sound design (gentle but unmistakable — pleasant even when it fires often):
-   *   - Three ascending water-drop "bloops": pure sine oscillators whose pitch
-   *     falls fast (exponential ramp high→low, the classic synthesized-
-   *     cash register mechanism) with a quick attack and a natural decay. The
-   *     rising plip-plop-ploop motif is instantly recognizable as "something
-   *     happened" without any urgency or harshness.
-   *   - A warm chime tail: two sine partials a perfect fifth apart bloom out
-   *     of the last drop and ring out softly, so the alert is clearly
-   *     noticeable at low volume.
-   *   - Sine waves only — no square/sawtooth buzz — capped at a modest peak,
-   *     with a light low-passed echo so repeats feel airy, not insistent.
-   *   - ~1.2s total, then silence (the old alert was a 3s buzzer).
+   * Play the cha-ching cash-register alert for tracked events.
+   * This is synthesized with the Web Audio API, so it needs no external file.
+   * The shared playback cooldown and alert gating are intentionally unchanged.
    */
   function playAlertSound() {
     if (!audioEnabled) return;
     const nowMs = Date.now();
-    // Cooldown 2.5s to avoid overlapping chimes when multiple games report at once
+    // Cooldown 2.5s to avoid overlapping sounds when multiple games report at once.
     if (nowMs - lastAlertAt < 2500) return;
     lastAlertAt = nowMs;
-    playRaindropChime();
+    playCashRegisterChime();
   }
 
   /**
-   * Build and fire a "cha-ching" cash register sound.
-   * Uses Web Audio API (no external file) so it works on static hosting.
-   *
-   * Sound design:
-   *   - "Cha": a sharp mechanical click/clack (short noise burst with fast decay)
-   *   - "Ching": a bright metallic bell tone (two sine partials with a slow decay)
-   *   - Total duration ~0.8s, punchy and unmistakable.
+   * Synthesize a short cash-register "cha-ching": two mechanical clacks,
+   * followed by a pair of rising, metallic bell notes. The master envelope
+   * fades to silence after 1.6 seconds, including the full bell decay.
    */
-  function playRaindropChime() {
+  function playCashRegisterChime() {
     try {
       const ctx = ensureAudioContext();
       if (!ctx) return;
       if (ctx.state === 'suspended') {
         ctx.resume().catch(() => {});
       }
-      const t0 = ctx.currentTime;
-      const PEAK = 0.35; // slightly louder for the cash register punch
 
-      // Master bus: quick fade out
+      const t0 = ctx.currentTime;
+      const SOUND_END = 1.6;
       const master = ctx.createGain();
       master.gain.setValueAtTime(0, t0);
-      master.gain.linearRampToValueAtTime(1, t0 + 0.005);
-      master.gain.setValueAtTime(1, t0 + 0.7);
-      master.gain.linearRampToValueAtTime(0, t0 + 0.85);
+      master.gain.linearRampToValueAtTime(1, t0 + 0.008);
+      master.gain.setValueAtTime(1, t0 + 1.32);
+      master.gain.linearRampToValueAtTime(0, t0 + SOUND_END);
       master.connect(ctx.destination);
 
-      // "CHA" — sharp mechanical click/clack
-      // Short burst of filtered noise with a very fast decay
-      const chaBuffer = ctx.createBuffer(1, Math.ceil(ctx.sampleRate * 0.03), ctx.sampleRate);
-      const chaData = chaBuffer.getChannelData(0);
-      for (let i = 0; i < chaData.length; i++) {
-        // White noise with exponential decay envelope
-        const envelope = Math.exp(-i / (chaData.length * 0.15));
-        chaData[i] = (Math.random() * 2 - 1) * envelope * 0.6;
-      }
-      const chaSource = ctx.createBufferSource();
-      chaSource.buffer = chaBuffer;
-      const chaFilter = ctx.createBiquadFilter();
-      chaFilter.type = 'bandpass';
-      chaFilter.frequency.value = 2200; // mid-high "clack" frequency
-      chaFilter.Q.value = 2.5;
-      const chaGain = ctx.createGain();
-      chaGain.gain.setValueAtTime(0, t0);
-      chaGain.gain.linearRampToValueAtTime(PEAK * 0.8, t0 + 0.001);
-      chaGain.gain.exponentialRampToValueAtTime(0.001, t0 + 0.04);
-      chaSource.connect(chaFilter);
-      chaFilter.connect(chaGain);
-      chaGain.connect(master);
-      chaSource.start(t0);
-      chaSource.stop(t0 + 0.05);
-
-      // "CHING" — bright metallic bell tone
-      // Two sine partials: fundamental + octave + slight detune for "metallic" quality
-      const chingStart = t0 + 0.035; // slight delay after "cha"
-      const fundamental = 880; // A5
-      const partials = [
-        { freq: fundamental, level: PEAK * 0.9 },      // fundamental
-        { freq: fundamental * 2, level: PEAK * 0.5 },  // octave
-        { freq: fundamental * 3, level: PEAK * 0.25 }, // 12th
-        { freq: fundamental * 4.25, level: PEAK * 0.15 }, // detuned upper partial for "ring"
+      // "Cha": a pair of brief, band-passed noise bursts like a register key
+      // and drawer mechanism. The second click is quieter and follows closely.
+      const clacks = [
+        { at: 0, duration: 0.045, frequency: 1450, level: 0.18 },
+        { at: 0.055, duration: 0.04, frequency: 2350, level: 0.11 },
       ];
-      partials.forEach((p, i) => {
-        const osc = ctx.createOscillator();
-        osc.type = 'sine';
-        osc.frequency.value = p.freq;
-        const g = ctx.createGain();
-        // Stagger the attacks slightly for a richer attack transient
-        const attackDelay = i * 0.003;
-        g.gain.setValueAtTime(0, chingStart);
-        g.gain.linearRampToValueAtTime(p.level, chingStart + 0.005 + attackDelay);
-        // Long exponential decay like a struck bell
-        g.gain.exponentialRampToValueAtTime(0.0005, chingStart + 0.7);
-        g.gain.setValueAtTime(0, chingStart + 0.82);
-        osc.connect(g);
-        g.connect(master);
-        osc.start(chingStart);
-        osc.stop(chingStart + 0.85);
+      clacks.forEach((clack) => {
+        const sampleCount = Math.ceil(ctx.sampleRate * clack.duration);
+        const buffer = ctx.createBuffer(1, sampleCount, ctx.sampleRate);
+        const samples = buffer.getChannelData(0);
+        for (let i = 0; i < samples.length; i++) {
+          const decay = Math.exp(-i / (samples.length * 0.18));
+          samples[i] = (Math.random() * 2 - 1) * decay;
+        }
+
+        const source = ctx.createBufferSource();
+        source.buffer = buffer;
+        const filter = ctx.createBiquadFilter();
+        filter.type = 'bandpass';
+        filter.frequency.value = clack.frequency;
+        filter.Q.value = 2.2;
+        const gain = ctx.createGain();
+        const startAt = t0 + clack.at;
+        gain.gain.setValueAtTime(0, startAt);
+        gain.gain.linearRampToValueAtTime(clack.level, startAt + 0.002);
+        gain.gain.exponentialRampToValueAtTime(0.001, startAt + clack.duration);
+        source.connect(filter);
+        filter.connect(gain);
+        gain.connect(master);
+        source.start(startAt);
+        source.stop(startAt + clack.duration);
       });
 
-      // Cleanup nodes after playback
+      // "Ching": two struck-bell notes rising from C6 to E6. Each note uses
+      // inharmonic sine partials for a bright metallic ring, with a long decay.
+      const notes = [
+        { at: 0.16, fundamental: 1046.5, level: 0.17 }, // C6
+        { at: 0.30, fundamental: 1318.5, level: 0.13 }, // E6
+      ];
+      const partialRatios = [1, 2.01, 2.97, 4.08];
+      const partialLevels = [1, 0.42, 0.22, 0.12];
+      notes.forEach((note) => {
+        partialRatios.forEach((ratio, index) => {
+          const osc = ctx.createOscillator();
+          osc.type = 'sine';
+          osc.frequency.value = note.fundamental * ratio;
+          const gain = ctx.createGain();
+          const startAt = t0 + note.at;
+          gain.gain.setValueAtTime(0, startAt);
+          gain.gain.linearRampToValueAtTime(note.level * partialLevels[index], startAt + 0.006);
+          gain.gain.exponentialRampToValueAtTime(0.0005, t0 + 1.48);
+          gain.gain.setValueAtTime(0, t0 + 1.55);
+          osc.connect(gain);
+          gain.connect(master);
+          osc.start(startAt);
+          osc.stop(t0 + 1.56);
+        });
+      });
+
+      // Disconnect the master after its scheduled 1.6s fade has completed.
       setTimeout(() => {
         try { master.disconnect(); } catch (_) {}
-      }, 1000);
+      }, 1700);
     } catch (err) {
       console.warn('alert sound failed', err);
     }

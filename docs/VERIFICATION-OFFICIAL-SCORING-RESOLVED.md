@@ -170,7 +170,7 @@ The MLB Live PBP system **already had** comprehensive support for tracking offic
 ### 3.3 Sound Alert System
 
 **Functionality:**
-- ✅ Pending rulings trigger raindrop chime
+- ✅ Pending rulings trigger the cha-ching cash-register alert
 - ✅ Alert fires immediately when detected
 - ✅ Only ABS challenges excluded
 
