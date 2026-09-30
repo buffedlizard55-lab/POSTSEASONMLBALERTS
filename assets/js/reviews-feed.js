@@ -2301,125 +2301,417 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
     }
   }
 
+  /* =========================================================================
+   * THE ALERT SOUND — "CHA-CHING!"
+   *
+   * There are TWO ways the site makes this sound, and the order matters:
+   *
+   *   1. A REAL RECORDING, if one is installed at `assets/audio/cha-ching.*`.
+   *      This is the preferred path and the only one that can ever sound
+   *      exactly like a real cash register, because it *is* one. Nothing is
+   *      committed there by default — see assets/audio/README.md for where to
+   *      get a legally clean one in two clicks and how to install it.
+   *
+   *   2. A SYNTHESIZED cha-ching, built below from scratch with the Web Audio
+   *      API. This is the fallback, so the alert is never silent on a fresh
+   *      clone. It is tuned against measurements taken from a real
+   *      cash-register recording; see docs/alert-sound.md for every number.
+   *
+   * Both paths are one alert: same events, same 2.5 s cooldown, same toggle.
+   * =======================================================================*/
+
+  /* ---------------------------------------------------------------
+   * Path 1 — the real recording
+   * ------------------------------------------------------------- */
+
   /**
-   * The complete "cha-ching!" cash-register alert, as data.
+   * Candidate paths, tried in this order. The first one that fetches, is not
+   * an HTML error page, and decodes to audio wins. Keeping the list short and
+   * the extension explicit means a missing file costs a handful of fast 404s
+   * once per page load, never a retry storm.
+   */
+  const ALERT_SAMPLE_PATHS = [
+    'assets/audio/cha-ching.mp3',
+    'assets/audio/cha-ching.wav',
+    'assets/audio/cha-ching.ogg',
+    'assets/audio/cha-ching.m4a',
+  ];
+  /** Remembers which path won, so a working install costs exactly one request. */
+  const ALERT_SAMPLE_PATH_KEY = 'replayFeedAlertSamplePath';
+  /**
+   * Playback target for the recording, in dBFS. A stock sound effect is
+   * mastered hot (the reference recording measures -0.0 dBFS peak); an alert
+   * that plays over a live scoreboard wants a little headroom so it does not
+   * clip on laptop speakers. Everything is normalized to this peak, so a quiet
+   * recording is not inaudible and a hot one does not distort.
+   */
+  const ALERT_SAMPLE_TARGET_PEAK_DB = -2.0;
+  /** Never boost a near-silent file by more than this, or its noise floor roars. */
+  const ALERT_SAMPLE_MAX_GAIN = 8;
+  /** Never cut a hot file by more than this. */
+  const ALERT_SAMPLE_MIN_GAIN = 0.1;
+
+  /** The installed recording: `{ buffer, gain, url }`, or null. */
+  let alertSample = null;
+  let alertSampleAttempted = false;
+  let alertSampleInFlight = null;
+
+  /** True peak of a decoded buffer across every channel, as a linear value. */
+  function peakOfBuffer(buffer) {
+    let peak = 0;
+    for (let c = 0; c < buffer.numberOfChannels; c++) {
+      const data = buffer.getChannelData(c);
+      for (let i = 0; i < data.length; i++) {
+        const v = data[i] < 0 ? -data[i] : data[i];
+        if (v > peak) peak = v;
+      }
+    }
+    return peak;
+  }
+
+  /**
+   * Adopt a decoded buffer as the alert. The gain normalizes its true peak to
+   * ALERT_SAMPLE_TARGET_PEAK_DB, clamped so neither a whisper nor a brick-
+   * walled master is forced into an unusable range.
+   */
+  function installAlertSample(buffer, url) {
+    if (!buffer || buffer.duration < 0.05) return null;
+    const peak = peakOfBuffer(buffer);
+    let gain = 1;
+    if (peak > 1e-4) {
+      const target = Math.pow(10, ALERT_SAMPLE_TARGET_PEAK_DB / 20);
+      gain = target / peak;
+      gain = Math.min(ALERT_SAMPLE_MAX_GAIN, Math.max(ALERT_SAMPLE_MIN_GAIN, gain));
+    }
+    alertSample = { buffer, gain, url: url || 'inline' };
+    return alertSample;
+  }
+
+  /**
+   * decodeAudioData has two shapes: the modern promise form and the legacy
+   * callback form. Browsers in the wild still differ, so accept either and
+   * settle exactly once. Never rejects for a missing-file case — the caller
+   * only sees a rejection for genuinely undecodable bytes.
+   */
+  function decodeAudio(ctx, bytes) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const done = (b) => { if (!settled) { settled = true; resolve(b); } };
+      const fail = (e) => { if (!settled) { settled = true; reject(e); } };
+      try {
+        const p = ctx.decodeAudioData(bytes, done, fail);
+        if (p && typeof p.then === 'function') p.then(done, fail);
+      } catch (err) {
+        fail(err);
+      }
+    });
+  }
+
+  /**
+   * True when the bytes are obviously an HTML error page rather than audio.
+   * Some static hosts answer an unknown path with index.html at status 200,
+   * which would otherwise be handed to the decoder and produce a confusing
+   * failure instead of a clean fallback.
+   */
+  function looksLikeHtml(bytes) {
+    const head = new Uint8Array(bytes, 0, Math.min(512, bytes.byteLength));
+    let text = '';
+    for (let i = 0; i < head.length; i++) text += String.fromCharCode(head[i]);
+    return /^\s*(<!doctype html|<html|<head|<\?xml)/i.test(text);
+  }
+
+  /**
+   * Install a recording the caller already holds (the Sound Lab's drag-and-drop,
+   * the server upload path, and the verification tools all go through here).
+   * `bytes` is copied before decoding because decodeAudioData detaches the
+   * buffer it is given, and the caller may still need the original.
+   */
+  function setAlertSampleFromBytes(bytes, label) {
+    const ctx = ensureAudioContext();
+    if (!ctx) return Promise.resolve(null);
+    if (!bytes || bytes.byteLength < 256 || looksLikeHtml(bytes)) return Promise.resolve(null);
+    return decodeAudio(ctx, bytes.slice(0))
+      .then((buffer) => installAlertSample(buffer, label))
+      .catch(() => null);
+  }
+
+  /**
+   * Find and decode the installed recording. Resolves to the installed sample
+   * or null. Idempotent and non-throwing: a fresh clone with no audio asset
+   * resolves null once and the synthesized alert takes over.
+   */
+  function loadAlertSample(ctx) {
+    if (alertSample) return Promise.resolve(alertSample);
+    if (alertSampleInFlight) return alertSampleInFlight;
+    if (alertSampleAttempted) return Promise.resolve(null);
+    alertSampleAttempted = true;
+    if (!ctx || typeof fetch !== 'function') return Promise.resolve(null);
+
+    // A previously winning path goes first so the common case is one request.
+    let paths = ALERT_SAMPLE_PATHS.slice();
+    try {
+      const remembered = typeof localStorage !== 'undefined'
+        ? localStorage.getItem(ALERT_SAMPLE_PATH_KEY) : null;
+      if (remembered && paths.indexOf(remembered) !== -1) {
+        paths = [remembered].concat(paths.filter((p) => p !== remembered));
+      }
+    } catch (_) {}
+
+    alertSampleInFlight = (async () => {
+      for (const url of paths) {
+        try {
+          const res = await fetch(url, { cache: 'no-cache' });
+          if (!res.ok) continue;
+          const bytes = await res.arrayBuffer();
+          if (!bytes || bytes.byteLength < 512 || looksLikeHtml(bytes)) continue;
+          // Copy: decodeAudioData detaches, and we may need the bytes again.
+          const buffer = await decodeAudio(ctx, bytes.slice(0));
+          const installed = installAlertSample(buffer, url);
+          if (!installed) continue;
+          try {
+            if (typeof localStorage !== 'undefined') {
+              localStorage.setItem(ALERT_SAMPLE_PATH_KEY, url);
+            }
+          } catch (_) {}
+          return installed;
+        } catch (_) {
+          // This candidate is missing or undecodable; try the next one.
+        }
+      }
+      return null;
+    })();
+    return alertSampleInFlight;
+  }
+
+  /** Forget an installed recording and allow the probe to run again. */
+  function clearAlertSample() {
+    alertSample = null;
+    alertSampleAttempted = false;
+    alertSampleInFlight = null;
+    try {
+      if (typeof localStorage !== 'undefined') localStorage.removeItem(ALERT_SAMPLE_PATH_KEY);
+    } catch (_) {}
+  }
+
+  /**
+   * Play the installed recording once. Returns the source node so the caller
+   * (and the verification tools) can see that something was scheduled.
+   */
+  function playAlertSample(ctx) {
+    if (!alertSample) return null;
+    const source = ctx.createBufferSource();
+    source.buffer = alertSample.buffer;
+    const gain = ctx.createGain();
+    gain.gain.value = alertSample.gain;
+    source.connect(gain);
+    gain.connect(ctx.destination);
+    source.start(ctx.currentTime);
+    return source;
+  }
+
+  /* ---------------------------------------------------------------
+   * Path 2 — the synthesized cha-ching (the fallback)
    *
-   * WHAT THE SOUND IS (measured from real cash-register recordings, not
-   * invented — docs/alert-sound.md lists the sources and the numbers):
+   * WHAT A REAL ONE MEASURES LIKE
    *
-   *   "cha"   the key drops, the gear train runs and the drawer springs open.
-   *           A train of SHORT, BRIGHT, SEPARATE clicks over a quiet bed — a
-   *           machine, not a hiss. In every reference recording this first
-   *           syllable is at least as loud as the bell.
-   *   "ching" one small hard metal bell, struck once by its hammer. Prime at
-   *           ~2.1 kHz with inharmonic partials; the bright upper partials die
-   *           first and the low hum tone lingers, which is what reads as metal.
-   *   drawer  slides out on its rollers and stops with a low thud. In the real
-   *           recordings the mechanism keeps moving AFTER the bell, so here
-   *           the drawer opens across the bell rather than ahead of it.
+   * A real cash-register "cha-ching" recording was decoded to PCM and measured
+   * directly for this rebuild (docs/alert-sound.md §2 records the method and
+   * the provenance). Verified figures, at 48 kHz:
    *
-   * WHY THE PREVIOUS BUILD SOUNDED WRONG, AND WHAT CHANGED:
-   *   1. THE BIG ONE: its "cha" was far too dark. Measured over the mechanism,
-   *      its spectral centroid was 3270 Hz against 6219 Hz and 6033 Hz in the
-   *      two reference recordings — nearly an octave low — and its low / mid /
-   *      high bands were 4.2 dB apart where the references are 1.0 and 2.7 dB
-   *      apart. A real "cha" is bright, broadband mechanical noise; that one
-   *      was a narrow, low, coloured band. It read as a hiss with a rumble
-   *      under it, not as a machine. Fixed by brightening the clicks, opening
-   *      up the bed's filter and the noise generator, and raising the sweeps.
-   *   2. It was also too smooth: only 2 separate attacks in the mechanism,
-   *      against 3 and 10 in the references. Fixed by chopping the bed into
-   *      uneven bursts (rattleEnvelope, below) and making the clicks shorter
-   *      and more resonant, so they are separate events — the "cha" now has 6.
-   *   3. The bell was NOT the problem: its prime (2093 Hz) and its single
-   *      strike both match the references, and both are kept. One thing did
-   *      change: its prime time constant was 0.191 s against the 0.219 s
-   *      measured on a real register bell, and it is now 0.28 s so the ring
-   *      carries the 1-2 second alert that was asked for.
+   *   t = 0.000-0.180 s  the "cha". Broadband mechanism. The 2098 Hz bell is
+   *                      at its noise floor (-24 to -37 dB) throughout, so the
+   *                      bell has NOT sounded yet. Loudness ramps from -21 dB
+   *                      to -6 dB RMS in the first 50 ms and then holds.
+   *   t = 0.185 s        the bell is struck. The 2098 Hz level jumps -31 dB ->
+   *                      -13 dB -> -7 dB inside one 10 ms step; 4805 Hz (2.29x)
+   *                      reaches -9.6 dB and 7734 Hz (3.69x) -14.3 dB. One
+   *                      strike only: the prime never re-attacks.
+   *   t = 0.185-0.60 s   the ring plus the drawer still moving. Broadband RMS
+   *                      stays between -6 and -12 dB right through 0.55 s.
+   *   t = 0.60-1.08 s    everything decays; the file ends before the bell dies.
    *
-   * Everything is synthesized with the Web Audio API — no audio file, no
-   * network fetch, nothing to load before the alert can fire.
+   *   loudest 25 ms RMS              -6.3 dB
+   *   body level (p90 RMS over 0-0.6s) -6.5 dB
+   *   whole-file crest (peak/RMS)    11.3 dB
+   *   true peak                      -0.0 dBFS
+   *   audible above -40 dB           1.070 s
+   *   spectral centroid              6937 Hz
+   *   bell prime                     2098 Hz, tau 0.219 s
+   *
+   * WHY THE BUILD THIS REPLACES DID NOT SOUND RIGHT
+   *
+   * It passed all 40 of its own render checks and still sounded wrong, because
+   * every one of those checks was taken on a narrow window or as a ratio — and
+   * the defect was in the sound's overall DYNAMICS, which none of them looked
+   * at. Measured the same way as the reference:
+   *
+   *   figure                        reference   replaced build
+   *   loudest 25 ms RMS              -6.3 dB      -16.8 dB   <- 10.5 dB too quiet
+   *   body level (p90, 0-0.6 s)      -6.5 dB      -17.5 dB   <- 11.0 dB too quiet
+   *   whole-file crest               11.3 dB       21.75 dB  <- far too spiky
+   *   audible above -40 dB           1.070 s        0.790 s  <- under the 1-2 s asked for
+   *   25 ms RMS envelope             -21 -> -6 dB   -17 dB, flat, then a monotonic decay
+   *
+   * A crest of 21.75 dB against the reference's 11.3 dB says the sound was a
+   * handful of thin spikes over near-silence: tick-tick-tinkle, not the loud
+   * CHUNK of a lever and the hard strike of a bell. Two design choices caused
+   * it, and both are undone here:
+   *
+   *   1. `rattle: 0.92` on the mechanism bed. That was added to turn a smooth
+   *      hiss into a machine by chopping the bed into bursts — and it worked on
+   *      its own metric (2 attacks became 6) but it also threw away the bed's
+   *      duty cycle, which is what the ear hears as body. The chop is now
+   *      shallow (0.35): the bed stays full, and the separate attacks come from
+   *      the clicks on top of it, which is where a real register's attacks come
+   *      from anyway.
+   *   2. Every mechanical layer was a short burst decaying to -68 dB inside its
+   *      own 11-26 ms, so almost nothing overlapped. The layers are now longer
+   *      and overlap, which fills the gaps: crest down, RMS up, same peak.
+   *
+   * The bell was NOT the problem and is kept: one strike, prime at the measured
+   * 2098 Hz, inharmonic partials, tau measured at 0.219 s. What changed is
+   * that it now strikes at the measured 0.185 s and is loud enough to dominate.
    */
   const ALERT_SOUND = {
-    // Master envelope. It sets the level and fades the tail away; it does not
-    // hold the sound up, because every layer carries its own decay and the
-    // bell has to be free to ring down like a struck bell.
-    level: 0.38,
-    fadeIn: 0.0015,
-    holdUntil: 0.55,
-    totalLength: 1.95,
+    // Master envelope. `level` is the single biggest fix: the replaced build's
+    // 0.38 put the whole alert ~8 dB down before any layer was considered, and
+    // its master then faded linearly from 0.55 s, dragging the ring with it.
+    // Now the level is set so the rendered true peak lands near -2 dBFS (the
+    // reference is -0.0 dBFS; a web alert wants a little headroom), and the
+    // hold runs past the point where the reference is still at -6 dB RMS.
+    level: 0.62,
+    fadeIn: 0.004,
+    holdUntil: 0.90,
+    totalLength: 2.05,
+    // Master bus soft-clipper: y = ceiling * tanh(drive * x) / tanh(drive).
+    // Slope at x = 0 is ceiling * drive / tanh(drive), i.e. quiet material is
+    // lifted while material at full input scale is held at `ceiling`, which is
+    // how the body gets louder without the peak getting higher. `ceiling` 0.68
+    // is -3.4 dBFS: loud for an alert, with real headroom left for a laptop
+    // speaker. `oversample` 4x keeps the saturation from aliasing back into
+    // the bell as fizz.
+    softClip: { drive: 1.9, ceiling: 0.68, curveSize: 4097, oversample: '4x' },
 
     // --- "cha": the mechanism ---------------------------------------------
-    // The key goes down: one bright, very short clack. It is the loudest click
-    // in the train and the brightest, so the syllable has an attack.
-    keyClack: { at: 0.000, centre: 6200, q: 0.9, duration: 0.026, level: 3.40, attack: 0.0008 },
-    // …then the gear train runs: six clicks falling in pitch and level as the
-    // spring unwinds and the lever travels. They are SHORT (11-16 ms, against
-    // 24-32 ms in the build this replaced) and separated by more than their own
-    // length, so the ear hears six events instead of one continuous band. The
-    // Q is high enough (3.1-4.6, against 0.8-1.2 before) that each click rings
-    // metal rather than thudding.
+    // The key goes down. In the reference this is a loud broadband SLAM that
+    // takes the level from -21 dB to -9 dB within 50 ms, not a 26 ms tick. It
+    // is therefore longer (55 ms), lower in centre (5.2 kHz rather than 6.2 kHz
+    // — the reference's centroid is bright but its energy is spread, and a
+    // 6.2 kHz bandpass at Q 0.9 is a thin chirp), and it overlaps the bed.
+    keyClack: { at: 0.000, centre: 5200, q: 0.70, duration: 0.055, level: 0.86, attack: 0.0025, drive: 2.6 },
+    // …then the gear train runs. Six clicks falling in pitch as the spring
+    // unwinds, but LONGER than before (20-30 ms, against 11-16 ms) so
+    // consecutive clicks overlap: that overlap is what turns a row of ticks
+    // into a continuous machine, and it is what brings the crest down from
+    // 21.75 dB toward the reference's 11.3 dB. Q stays high enough (2.6-4.2)
+    // that each one still rings metal.
     gearClicks: [
-      { at: 0.018, centre: 4600, q: 4.6, duration: 0.016, level: 3.10, attack: 0.0004 },
-      { at: 0.041, centre: 4000, q: 4.3, duration: 0.015, level: 2.95, attack: 0.0004 },
-      { at: 0.065, centre: 3450, q: 4.0, duration: 0.014, level: 2.80, attack: 0.0004 },
-      { at: 0.090, centre: 2950, q: 3.7, duration: 0.013, level: 2.60, attack: 0.0004 },
-      { at: 0.116, centre: 2500, q: 3.4, duration: 0.012, level: 2.40, attack: 0.0004 },
-      { at: 0.143, centre: 2150, q: 3.1, duration: 0.011, level: 2.20, attack: 0.0004 },
+      { at: 0.014, centre: 4500, q: 4.2, duration: 0.030, level: 1.42, attack: 0.0006 },
+      { at: 0.034, centre: 3950, q: 3.9, duration: 0.028, level: 1.38, attack: 0.0006 },
+      { at: 0.055, centre: 3400, q: 3.6, duration: 0.026, level: 1.34, attack: 0.0006 },
+      { at: 0.078, centre: 2950, q: 3.2, duration: 0.026, level: 1.30, attack: 0.0006 },
+      { at: 0.102, centre: 2550, q: 2.9, duration: 0.024, level: 1.26, attack: 0.0006 },
+      { at: 0.128, centre: 2200, q: 2.6, duration: 0.030, level: 1.22, attack: 0.0006 },
     ],
-    // The bed under the clicks. Measured on the reference recordings, the
-    // "cha" is close to FLAT across 150 Hz - 6 kHz (1.0 dB and 2.7 dB between
-    // its low / mid / high bands) with a spectral centroid near 6 kHz: it is
-    // broadband, bright mechanical noise, not a narrow coloured band. So the
-    // bed here is deliberately wide (low Q, a gentle downward drift) rather
-    // than the narrow swooping band the replaced build used, and it carries
-    // less of the level than the clicks do, so their attacks survive.
-    ratchet: { at: 0.004, duration: 0.150, fromCentre: 6500, toCentre: 2400, q: 0.26, level: 2.40, rattle: 0.92 },
-    // The heavy case answering the key: a low knock that sags in pitch. Quiet
-    // — it only has to put the low end under the rattle, not thump.
-    leverBody: { at: 0.002, tones: [200, 120], level: 0.55, tau: 0.030 },
+    // The beds under the clicks, and the thing that carries the body of the
+    // "cha". There are TWO, because a real mechanism is broadband and one
+    // bandpass cannot be: a bright bed for the rattle (6.2 -> 3.0 kHz) and a
+    // body bed for the machine's weight (1.9 -> 0.75 kHz). Splitting them also
+    // halves each one's sweep, so each loses less level to its own filter.
+    //
+    // `envelope` is the measured staircase of the reference recording: three
+    // steps up over the first 46 ms — which is where all three of its countable
+    // attacks are — then a HOLD right up to the strike at 0.185 s. Times are
+    // relative to each bed's own `at`.
+    beds: [
+      {
+        name: 'bright', at: 0.002, duration: 0.200, fromCentre: 6200, toCentre: 3000,
+        q: 0.35, level: 1.30, rattle: 0.45, drive: 3.2,
+        envelope: [[0, 0.0001], [0.006, 0.04], [0.016, 0.05], [0.018, 0.16],
+          [0.030, 0.17], [0.032, 0.38], [0.044, 0.40], [0.046, 1.00],
+          [0.148, 0.95], [0.176, 0.30], [0.200, 0.0004]],
+      },
+      {
+        name: 'body', at: 0.002, duration: 0.212, fromCentre: 1900, toCentre: 750,
+        q: 0.50, level: 1.10, rattle: 0.25, drive: 3.2,
+        envelope: [[0, 0.0001], [0.008, 0.05], [0.018, 0.07], [0.020, 0.24],
+          [0.032, 0.26], [0.034, 0.50], [0.046, 0.52], [0.048, 1.00],
+          [0.150, 0.96], [0.181, 0.34], [0.212, 0.0004]],
+      },
+    ],
+    // The heavy case answering the key. The reference has real low-frequency
+    // content under the rattle (223 / 375 / 609 / 773 Hz all within 4 dB of
+    // each other), so this is three tones reaching down to 86 Hz and it decays
+    // more slowly than before — it is the weight of the machine, not a knock.
+    leverBody: { at: 0.002, tones: [182, 112], level: 0.52, tau: 0.050 },
 
     // --- the drawer --------------------------------------------------------
     // It starts rolling while the mechanism is still running and keeps going
-    // after the bell, which is what the real recordings do.
-    drawerSlide: { at: 0.030, duration: 0.400, fromCentre: 3500, toCentre: 700, q: 0.50, level: 1.25, rattle: 0.30 },
+    // well past the bell, which is what the reference does: its broadband
+    // envelope is still at -6 to -9 dB RMS at 0.43-0.53 s, long after the
+    // strike, and does not reach -19 dB until 0.62 s.
+    drawerSlide: {
+      at: 0.045, duration: 0.520, fromCentre: 3300, toCentre: 700, q: 0.45,
+      level: 0.44, rattle: 0.35, drive: 2.6,
+      envelope: [[0, 0.0001], [0.020, 0.70], [0.140, 0.95], [0.390, 1.00],
+        [0.520, 0.0004]],
+    },
     drawerStop: {
-      at: 0.455, tones: [148, 92], level: 0.36, tau: 0.050,
-      clickCentre: 1150, clickQ: 1.6, clickDuration: 0.018, clickLevel: 0.17,
+      at: 0.585, tones: [152, 94], level: 0.55, tau: 0.060,
+      clickCentre: 1150, clickQ: 1.6, clickDuration: 0.022, clickLevel: 0.24,
     },
 
     // --- "ching": the register bell, struck ONCE ---------------------------
-    // 2093 Hz is the measured prime of a real cash-register recording (a
-    // 2098 Hz peak standing 24 dB above everything around it). The partial
-    // ratios below come from that recording and from a second one, whose bell
-    // rings at 1523 / 4463 / 5502 Hz. Every ratio is inharmonic — that is what
-    // makes it metal rather than a tone — and the time constants fall as the
-    // partials rise, so the bright ones die first and the 0.5x hum tone
-    // outlasts everything and carries the tail.
+    // 2098 Hz is the prime measured directly on the reference recording (a
+    // peak standing 24 dB above everything around it, with inharmonic partners
+    // at 2.29x = 4805 Hz and 3.69x = 7734 Hz, plus the 2.93 / 3.61 / 4.69 /
+    // 5.24x mode ratios measured on a second recording). Every ratio is
+    // inharmonic — that is what makes it metal rather than a tone — and the
+    // time constants fall as the partials rise, so the bright ones die first
+    // and the 0.5x hum tone outlasts everything and carries the tail.
     //
-    // The prime's tau is 0.28 s: the reference bells measure ~0.22 s, and the
-    // alert has to stay audible for the 1-2 s that was asked for, so the ring
-    // is held a little longer than a bare bell would hold it.
-    bellFundamental: 2093,
+    // The prime's tau is 0.33 s — deliberately LONGER than the 0.219 s measured
+    // on the reference, because that reference file is cut off at 1.08 s with
+    // the bell still ringing. The alert has to stay audible for the 1-2 s that
+    // was asked for, so the prime is let out past what the recording shows and
+    // the master fade (holdUntil 0.90 s, totalLength 2.05 s) ends it. The
+    // rendered decay rate is checked at -28.2 dB/s by tools/render-alert-sound.mjs.
+    bellFundamental: 2098,
+    //
+    // `phase` is a sub-millisecond start offset for that partial, expressed as
+    // a fraction of bellPhaseSpread. It exists because the Web Audio API starts
+    // every OscillatorNode at phase 0: twelve partials struck "together"
+    // therefore all reach their positive peak on the same sample and sum into
+    // one spike. That spike — not the loudness of the bell — is what capped the
+    // whole alert's level. A real hammer does not phase-lock a bell's modes, so
+    // the offsets below are deliberately irregular, and the render measures the
+    // crest they save.
     bellPartials: [
-      { ratio: 0.500, gain: 0.09, tau: 0.460 },  // 1047 Hz  hum tone — carries the tail
-      { ratio: 1.000, gain: 1.00, tau: 0.280 },  // 2093 Hz  the prime — the "ching" itself
-      { ratio: 1.061, gain: 0.15, tau: 0.200 },  // 2221 Hz  partner just over the prime
-      { ratio: 1.187, gain: 0.20, tau: 0.150 },  // 2484 Hz
-      { ratio: 1.502, gain: 0.22, tau: 0.110 },  // 3144 Hz
-      { ratio: 2.291, gain: 0.34, tau: 0.075 },  // 4795 Hz  the bright metallic pair
-      { ratio: 2.526, gain: 0.26, tau: 0.062 },  // 5287 Hz
-      { ratio: 2.930, gain: 0.18, tau: 0.050 },  // 6133 Hz
-      { ratio: 3.610, gain: 0.12, tau: 0.040 },  // 7556 Hz
-      { ratio: 4.690, gain: 0.09, tau: 0.035 },  // 9816 Hz
-      { ratio: 5.240, gain: 0.05, tau: 0.030 },  // 10967 Hz air
+      { ratio: 0.500, gain: 0.15, tau: 0.760, phase: 0.00 },  // 1049 Hz  hum tone — carries the tail
+      { ratio: 1.000, gain: 1.00, tau: 0.330, phase: 0.13 },  // 2098 Hz  the prime — the "ching" itself
+      { ratio: 1.061, gain: 0.16, tau: 0.190, phase: 0.71 },  // 2226 Hz  partner just over the prime
+      { ratio: 1.187, gain: 0.21, tau: 0.145, phase: 0.34 },  // 2490 Hz
+      { ratio: 1.502, gain: 0.23, tau: 0.105, phase: 0.88 },  // 3151 Hz
+      { ratio: 2.291, gain: 0.38, tau: 0.072, phase: 0.47 },  // 4806 Hz  measured on the reference
+      { ratio: 2.526, gain: 0.27, tau: 0.060, phase: 0.09 },  // 5300 Hz
+      { ratio: 2.930, gain: 0.20, tau: 0.048, phase: 0.62 },  // 6147 Hz
+      { ratio: 3.610, gain: 0.14, tau: 0.038, phase: 0.26 },  // 7574 Hz
+      { ratio: 3.687, gain: 0.13, tau: 0.036, phase: 0.79 },  // 7735 Hz  measured on the reference
+      { ratio: 4.690, gain: 0.10, tau: 0.033, phase: 0.41 },  // 9840 Hz
+      { ratio: 5.240, gain: 0.06, tau: 0.028, phase: 0.95 },  // 10994 Hz air
     ],
-    // One strike: "cha-CHING", not "ching-ching".
-    bellStrikes: [{ at: 0.170, level: 0.40 }],
+    // Full range of those offsets. 1.5 ms is ~3 cycles of the 2098 Hz prime, so
+    // it is far too short to be heard as a spread, and long enough that the
+    // partials no longer add in phase.
+    bellPhaseSpread: 0.0015,
+    // One strike, at the time measured on the reference: "cha-CHING", never
+    // "ching-ching". The reference's 2098 Hz onset is 0.185 s and its peak
+    // 0.237 s, so 0.185 s is where the hammer lands.
+    bellStrikes: [{ at: 0.185, level: 0.50 }],
     bellAttack: 0.0015,
     // The hammer reaching the bell a beat before the tone blooms: that tick is
     // what gives the strike its transient.
-    hammerTick: { lead: 0.003, duration: 0.005, centre: 7200, q: 0.8, level: 4.20 },
+    hammerTick: { lead: 0.003, duration: 0.006, centre: 7200, q: 0.8, level: 4.60 },
     // Partials are cut off a few time-constants after the strike; the master
     // fade has already silenced them by then.
     tailTimeConstants: 7,
@@ -2436,6 +2728,7 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
     const buffer = ctx.createBuffer(1, frames, ctx.sampleRate);
     const samples = buffer.getChannelData(0);
     for (let i = 0; i < samples.length; i++) samples[i] = Math.random() * 2 - 1;
+    saturateNoise(samples, opts.drive);
 
     const source = ctx.createBufferSource();
     source.buffer = buffer;
@@ -2455,17 +2748,63 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
   }
 
   /**
-   * A rattle envelope: a train of short, uneven bursts, as irregular as a
-   * mechanism actually is.
+   * The master soft-clip curve, as a Float32Array for WaveShaperNode.
+   * Sample i covers input x = 2*i/(size-1) - 1 over [-1, 1] and maps it to
+   * ceiling * tanh(drive * x) / tanh(drive). Odd size so x = 0 lands exactly on
+   * a sample and the curve stays antisymmetric (no DC, no even harmonics).
+   */
+  function softClipCurve (spec) {
+    let size = Math.max(3, spec.curveSize || 2049);
+    if (size % 2 === 0) size += 1;
+    const drive = spec.drive > 0 ? spec.drive : 1;
+    const ceiling = spec.ceiling > 0 ? spec.ceiling : 1;
+    const norm = ceiling / Math.tanh(drive);
+    const curve = new Float32Array(size);
+    for (let i = 0; i < size; i++) {
+      const x = (i / (size - 1)) * 2 - 1;
+      curve[i] = Math.tanh(x * drive) * norm;
+    }
+    return curve;
+  }
+
+  /**
+   * Soft-saturate a noise buffer in place and return it normalized so its
+   * largest sample is 1 again.
    *
-   * The replaced build's "cha" was one smooth, continuous band of noise, and
-   * a smooth band is a hiss. Measured on the rendered PCM its mechanism had
-   * only 2 separate attacks, where the two reference recordings have 3 and 10.
-   * (Its 2 ms envelope also varied by just 2.9 dB against the references'
-   * 5.5 dB and 8.1 dB — but most of that gap is the references ramping up from
-   * silence, so the attack count, not the envelope spread, is the honest
-   * measure.) Multiplying the bed by this envelope turns a hiss into a machine
-   * working, and takes the mechanism from 2 attacks to 6.
+   * WHY: Gaussian noise has a crest factor around 12-14 dB, and a bed built
+   * from it therefore needs its peak held ~12 dB above its RMS. Measured on a
+   * real cash-register recording the whole file's peak sits only ~6.5 dB above
+   * its body level, because a real mechanism is dozens of overlapping impacts
+   * and resonances rather than one noise source, and because metal hits its
+   * stops and compresses. The site cannot model dozens of independent sources,
+   * so it compresses instead: tanh pulls the big excursions in harder than the
+   * small ones, which lowers crest without lowering RMS. That is the difference
+   * between an alert that is loud and one that merely peaks, and it is what
+   * lets the mechanism run ~6 dB hotter under the same ceiling.
+   *
+   * `drive` is how hard the buffer is pushed into the curve; 1 leaves it alone.
+   */
+  function saturateNoise (samples, drive) {
+    if (!drive || drive <= 1) return samples;
+    const norm = 1 / Math.tanh(drive);
+    for (let i = 0; i < samples.length; i++) {
+      samples[i] = Math.tanh(samples[i] * drive) * norm;
+    }
+    return samples;
+  }
+
+  /**
+   * A rattle envelope: the bed's amplitude is modulated by a train of uneven
+   * bursts, so a continuous band of noise reads as a mechanism working rather
+   * than as a hiss.
+   *
+   * `depth` controls how much of the bed survives between bursts: the envelope
+   * runs from (1 - depth) to 1. The build this replaces used depth 0.92, which
+   * dropped the bed to 8 % between bursts. That did create separate attacks —
+   * but it also removed the bed's duty cycle, and the duty cycle is what the
+   * ear hears as body. Measured on the whole render, the result was a crest of
+   * 21.75 dB against the reference's 11.3 dB and a body level 11 dB too quiet.
+   * depth 0.35 keeps the texture and keeps the body.
    */
   function rattleEnvelope (frames, sampleRate, depth) {
     const env = new Float32Array(frames);
@@ -2495,9 +2834,27 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
 
   /**
    * A band of noise whose centre frequency sweeps downward while it plays, so
-   * the ear hears travel rather than a static hiss. Used twice: for the body
-   * of the mechanism under the gear clicks (the "cha"), and for the drawer
-   * rolling out on its rollers. `spec.rattle` chops it into uneven bursts.
+   * the ear hears travel rather than a static hiss. Used for the two beds of
+   * the mechanism (the "cha") and for the drawer rolling out on its rollers.
+   * `spec.rattle` modulates it (see above) and `spec.envelope` shapes it.
+   *
+   * `spec.envelope` is a list of `[secondsFromLayerStart, gainFraction]` points
+   * ramped linearly between. Without it the bed simply attacks in 12 ms and
+   * then fades — which is what the build this replaces did, and it is
+   * backwards: measured on a real recording the "cha" is a STAIRCASE that ramps
+   * from -24 dB to -7 dB over the first 45 ms and then HOLDS at -6 to -9 dB all
+   * the way to the strike (2 ms envelope table in docs/alert-sound.md). The old
+   * shape peaked at 12 ms and had decayed to -21 dB by the time the bell was
+   * struck, so the bell arrived after the machine had already wound down
+   * instead of on top of a machine still running at full weight.
+   *
+   * Each point is also compensated for the sweep. A constant-Q bandpass passes
+   * a narrower ABSOLUTE bandwidth as its centre falls (bandwidth = centre / Q),
+   * and noise through it therefore loses power in proportion, so sweeping
+   * 6.2 kHz down to 0.75 kHz silently costs ~9 dB even with the gain node held
+   * flat. Multiplying each point by sqrt(fromCentre / centre(t)) holds the
+   * passed noise power constant, so the bed's loudness is the envelope's
+   * decision and not an accident of the filter.
    */
   function sweptNoise (ctx, destination, at, spec) {
     const frames = Math.max(1, Math.ceil(ctx.sampleRate * spec.duration));
@@ -2508,6 +2865,7 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
       smooth = 0.30 * smooth + 0.70 * (Math.random() * 2 - 1);
       samples[i] = smooth;
     }
+    saturateNoise(samples, spec.drive);
     if (spec.rattle) {
       const env = rattleEnvelope(frames, ctx.sampleRate, spec.rattle);
       for (let i = 0; i < frames; i++) samples[i] *= env[i];
@@ -2520,11 +2878,29 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
     filter.Q.value = spec.q;
     filter.frequency.setValueAtTime(spec.fromCentre, at);
     filter.frequency.linearRampToValueAtTime(spec.toCentre, at + spec.duration);
+    const centreAt = (t) => spec.fromCentre +
+      (spec.toCentre - spec.fromCentre) * Math.min(1, Math.max(0, t / spec.duration));
+    const compensate = (t) => Math.sqrt(spec.fromCentre / Math.max(1, centreAt(t)));
+
     const gain = ctx.createGain();
-    gain.gain.setValueAtTime(0.0001, at);
-    gain.gain.linearRampToValueAtTime(spec.level, at + 0.02);
-    gain.gain.linearRampToValueAtTime(spec.level * 0.8, at + spec.duration * 0.7);
-    gain.gain.linearRampToValueAtTime(0.0004, at + spec.duration);
+    if (Array.isArray(spec.envelope) && spec.envelope.length) {
+      // linearRampToValueAtTime needs a preceding event to ramp FROM.
+      gain.gain.setValueAtTime(0.0001, at);
+      spec.envelope.forEach((point) => {
+        const t = Math.min(spec.duration, Math.max(0, point[0]));
+        const v = Math.max(0.0001, point[1] * compensate(t));
+        gain.gain.linearRampToValueAtTime(spec.level * v, at + t);
+      });
+      const last = spec.envelope[spec.envelope.length - 1][0];
+      if (last < spec.duration) {
+        gain.gain.linearRampToValueAtTime(0.0004, at + spec.duration);
+      }
+    } else {
+      gain.gain.setValueAtTime(0.0001, at);
+      gain.gain.linearRampToValueAtTime(spec.level, at + 0.012);
+      gain.gain.linearRampToValueAtTime(spec.level * 0.85, at + spec.duration * 0.7);
+      gain.gain.linearRampToValueAtTime(0.0004, at + spec.duration);
+    }
     source.connect(filter);
     filter.connect(gain);
     gain.connect(destination);
@@ -2533,8 +2909,8 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
   }
 
   /**
-   * A low mechanical thud: two short triangle tones that drop slightly in
-   * pitch (the "give" of a heavy drawer) and decay away in a few tens of ms.
+   * A low mechanical thud: short triangle tones that drop slightly in pitch
+   * (the "give" of a heavy drawer) and decay away in a few tens of ms.
    */
   function thump (ctx, destination, at, tones, level, tau) {
     tones.forEach((frequency) => {
@@ -2570,18 +2946,20 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
     });
 
     spec.bellPartials.forEach((partial) => {
+      // Decorrelate: see `phase` in the design data above.
+      const start = at + (partial.phase || 0) * (spec.bellPhaseSpread || 0);
       const osc = ctx.createOscillator();
       osc.type = 'sine';
       osc.frequency.value = spec.bellFundamental * partial.ratio;
       const gain = ctx.createGain();
       const peak = level * partial.gain;
-      const decayTo = at + spec.bellAttack + partial.tau * spec.tailTimeConstants;
-      gain.gain.setValueAtTime(0.0001, at);
-      gain.gain.linearRampToValueAtTime(peak, at + spec.bellAttack);
+      const decayTo = start + spec.bellAttack + partial.tau * spec.tailTimeConstants;
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.linearRampToValueAtTime(peak, start + spec.bellAttack);
       gain.gain.exponentialRampToValueAtTime(0.0004, decayTo);
       osc.connect(gain);
       gain.connect(destination);
-      osc.start(at);
+      osc.start(start);
       // The envelope keeps its designed decay, but the oscillator is stopped
       // once the alert is over: by then the master fade has silenced it, so
       // nothing is left running in the background.
@@ -2605,17 +2983,63 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
     master.gain.linearRampToValueAtTime(sound.level, t0 + sound.fadeIn);
     master.gain.linearRampToValueAtTime(sound.level, t0 + sound.holdUntil);
     master.gain.linearRampToValueAtTime(0, t0 + sound.totalLength);
-    master.connect(destination);
+
+    // A soft-clipper on the master bus, and the reason the alert can be loud.
+    //
+    // The real recording this sound is tuned against sits at 0.0 dBFS with its
+    // body only ~6.5 dB below that — but dozens of its samples are at EXACTLY
+    // full scale, so it was hard-limited when it was mastered. That low
+    // peak-to-body ratio is a mastering artifact, not an acoustic property of a
+    // cash register, and it cannot be reproduced by turning the mechanism down:
+    // measured, doing that costs ~6 dB of body and puts the alert back where
+    // the build this replaces was. So the alert does what the recording did and
+    // limits the bus, which lets the mechanism run hot while the gear clicks on
+    // top of it (the peaks measure at t = 0.086-0.093 s and t = 0.141 s) get
+    // caught instead of clipping.
+    //
+    // It is a WaveShaperNode rather than a DynamicsCompressorNode on purpose.
+    // A compressor is stateful (attack/release) and the offline engine used to
+    // verify this file implements createDynamicsCompressor() as a NO-OP —
+    // measured, its output is byte-identical with and without one, so anything
+    // a compressor did here would ship unverified. A WaveShaper applies a fixed
+    // curve sample by sample, so it renders identically in the verification
+    // harness and in a browser, and its output cannot exceed `ceiling` by
+    // construction: WaveShaper clamps its input to [-1, 1] before the lookup,
+    // so clipping the alert is impossible no matter how the design data moves.
+    //
+    // Optional by design: a context without createWaveShaper (or one that throws
+    // building it) gets master -> destination and a quieter alert, never a
+    // broken one.
+    let output = master;
+    if (sound.softClip && typeof ctx.createWaveShaper === 'function') {
+      try {
+        const shaper = ctx.createWaveShaper();
+        shaper.curve = softClipCurve(sound.softClip);
+        if (sound.softClip.oversample) shaper.oversample = sound.softClip.oversample;
+        master.connect(shaper);
+        shaper.connect(destination);
+        output = shaper;
+      } catch (_) {
+        master.connect(destination);
+      }
+    } else {
+      master.connect(destination);
+    }
+    // The node actually wired to `destination`, so the caller can detach the
+    // whole chain when the tail has finished.
+    master.output = output;
 
     // --- "cha": the key drops and the mechanism runs ------------------------
-    // This is the first syllable and it is LOUD — in every reference
-    // recording the mechanism is within a few dB of the bell, not a quiet
-    // ticking underneath it.
+    // This is the first syllable and it is LOUD — in the reference recording
+    // the mechanism reaches -6 dB RMS within 50 ms and the bell has not sounded
+    // yet. A quiet tick here is the difference between "cha-ching" and "tick".
     noiseBurst(ctx, master, t0 + sound.keyClack.at, sound.keyClack);
     sound.gearClicks.forEach((click) => {
       noiseBurst(ctx, master, t0 + click.at, click);
     });
-    sweptNoise(ctx, master, t0 + sound.ratchet.at, sound.ratchet);
+    sound.beds.forEach((bed) => {
+      sweptNoise(ctx, master, t0 + bed.at, bed);
+    });
     thump(ctx, master, t0 + sound.leverBody.at, sound.leverBody.tones,
       sound.leverBody.level, sound.leverBody.tau);
 
@@ -2641,6 +3065,33 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
   }
 
   /**
+   * The alert: the installed recording when there is one, the synthesized
+   * cha-ching when there is not. Nothing here is allowed to throw — a missing
+   * audio asset, a blocked AudioContext or a suspended context must never take
+   * down the feed that called it.
+   */
+  function playChaChing() {
+    try {
+      const ctx = ensureAudioContext();
+      if (!ctx) return;
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+      }
+      if (alertSample) {
+        playAlertSample(ctx);
+        return;
+      }
+      // No recording installed (or it has not finished loading yet): synthesize
+      // so the alert is never silent, and keep loading in the background so
+      // the next alert uses the real thing.
+      playCashRegisterChime(ctx);
+      loadAlertSample(ctx);
+    } catch (err) {
+      console.warn('alert sound failed', err);
+    }
+  }
+
+  /**
    * Play the cha-ching cash-register alert for tracked events.
    * The shared playback cooldown and alert gating are intentionally unchanged.
    */
@@ -2650,28 +3101,53 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
     // Cooldown 2.5s to avoid overlapping sounds when multiple games report at once.
     if (nowMs - lastAlertAt < 2500) return;
     lastAlertAt = nowMs;
-    playCashRegisterChime();
+    playChaChing();
   }
 
   /**
-   * Play the alert through the live AudioContext. Everything is synthesized,
-   * so it needs no external file; the graph itself lives in
-   * buildCashRegisterChime() above.
+   * Play the SYNTHESIZED cha-ching through the live AudioContext. Everything is
+   * generated in-browser, so it needs no external file; the graph itself lives
+   * in buildCashRegisterChime() above. Kept as its own function because the
+   * verification tools call it directly to render the fallback in isolation.
    */
-  function playCashRegisterChime() {
+  function playCashRegisterChime(ctxArg) {
     try {
-      const ctx = ensureAudioContext();
-      if (!ctx) return;
+      const ctx = ctxArg || ensureAudioContext();
+      if (!ctx) return null;
       if (ctx.state === 'suspended') {
         ctx.resume().catch(() => {});
       }
       const master = buildCashRegisterChime(ctx, ctx.destination, ctx.currentTime);
-      // Disconnect once the scheduled tail has finished playing.
+      // Disconnect once the scheduled tail has finished playing. `master.output`
+      // is the limiter (or the master itself when there is no limiter), so this
+      // detaches the whole chain and leaves nothing parked on the destination.
       setTimeout(() => {
         try { master.disconnect(); } catch (_) {}
+        try { if (master.output && master.output !== master) master.output.disconnect(); } catch (_) {}
       }, Math.round(ALERT_SOUND.totalLength * 1000) + 250);
+      return master;
     } catch (err) {
       console.warn('alert sound failed', err);
+      return null;
+    }
+  }
+
+  /**
+   * Make sure the AudioContext exists, is running, and the real recording is
+   * loaded — all of which need (or at least benefit from) a user gesture.
+   * Called from the sound toggle and from a one-time first-gesture listener,
+   * so the very first alert a user hears is the one they will keep hearing.
+   */
+  function primeAlertSound() {
+    try {
+      const ctx = ensureAudioContext();
+      if (!ctx) return Promise.resolve(null);
+      if (ctx.state === 'suspended' && typeof ctx.resume === 'function') {
+        ctx.resume().catch(() => {});
+      }
+      return loadAlertSample(ctx);
+    } catch (_) {
+      return Promise.resolve(null);
     }
   }
 
@@ -2681,7 +3157,7 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
    *
    * By request this plays the SAME cha-ching cash register sound as an ordinary new
    * review — one alert sound for the whole page. It is not a separate voice,
-   * it literally calls the same graph builder, so the two can never drift.
+   * it literally calls the same playback function, so the two can never drift.
    *
    * The urgency is carried by everything else instead: the persistent red
    * run-at-risk banner, the row badge and glow, the "Runs at Risk" stat and
@@ -2865,13 +3341,13 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
     } catch (_) {}
     updateSoundToggleUI();
     if (audioEnabled) {
-      const ctx = ensureAudioContext();
-      if (ctx && ctx.state === 'suspended') {
-        ctx.resume().catch(() => {});
-      }
-      // Play the chime once as a preview so the user knows what to listen
-      // for (triggered directly on the user gesture, which satisfies
-      // autoplay policy)
+      // Start fetching the installed recording first, then play the preview
+      // SYNCHRONOUSLY on this same user gesture (which is what satisfies
+      // autoplay policy). The preview is never awaited: an alert must not be
+      // delayed by a network round-trip, and when the recording is already
+      // decoded — the usual case, because the first-gesture primer below runs
+      // before the user reaches this toggle — the preview IS the recording.
+      primeAlertSound();
       playAlertSound();
     }
   }
@@ -4437,6 +4913,31 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
     buildCashRegisterChime(ctx, destination, t0, spec) {
       return buildCashRegisterChime(ctx, destination, t0, spec);
     },
+    // The real-recording path. The Sound Lab (sound-lab.html) uses these to
+    // audition and install a recording without a page reload; the tests use
+    // them to prove the recording is preferred and that the synthesized
+    // fallback still fires when there is no recording to load.
+    alertSamplePaths: ALERT_SAMPLE_PATHS.slice(),
+    primeAlertSound() { return primeAlertSound(); },
+    clearAlertSample() { clearAlertSample(); },
+    setAlertSampleFromBytes(bytes, label) { return setAlertSampleFromBytes(bytes, label); },
+    getAlertSample() {
+      if (!alertSample) return null;
+      return {
+        url: alertSample.url,
+        gain: alertSample.gain,
+        duration: alertSample.buffer.duration,
+        sampleRate: alertSample.buffer.sampleRate,
+        channels: alertSample.buffer.numberOfChannels,
+      };
+    },
+    playAlertSampleNow() {
+      const ctx = ensureAudioContext();
+      if (!ctx) return false;
+      if (ctx.state === 'suspended' && typeof ctx.resume === 'function') ctx.resume().catch(() => {});
+      return !!playAlertSample(ctx);
+    },
+    playSynthAlertNow() { return !!playCashRegisterChime(); },
     toggleNotify() { setNotifyEnabled(!notifyEnabled); },
     setNotifyEnabled(enabled) { setNotifyEnabled(enabled); },
     getNotifyEnabled() { return notifyEnabled; },
@@ -4465,6 +4966,22 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
     updateNotifyToggleUI();
     const refreshBtn = $('#refresh-btn');
     if (refreshBtn) refreshBtn.addEventListener('click', () => load());
+    // Prime the alert sound on the first gesture anywhere on the page, not just
+    // on the sound toggle. Creating the AudioContext and fetching the installed
+    // recording both want a gesture, and doing them here means the recording is
+    // usually already decoded by the time the user turns the sound on — so the
+    // very first cha-ching they hear is the one every later alert will use.
+    if (typeof document.addEventListener === 'function') {
+      const primeOnce = () => {
+        ['pointerdown', 'keydown', 'touchstart'].forEach((type) => {
+          try { document.removeEventListener(type, primeOnce); } catch (_) {}
+        });
+        primeAlertSound();
+      };
+      ['pointerdown', 'keydown', 'touchstart'].forEach((type) => {
+        try { document.addEventListener(type, primeOnce, { once: true, passive: true }); } catch (_) {}
+      });
+    }
     const soundBtn = $('#sound-toggle-btn');
     if (soundBtn) {
       soundBtn.addEventListener('click', () => {
@@ -4502,6 +5019,15 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
         window.addEventListener('pagehide', () => { saveFeedLogNow(); });
       }
     } catch (_) {}
+    // A page with no feed to drive stops here. sound-lab.html loads this
+    // module for its audio alone; without this guard that utility page would
+    // start polling statsapi, open the feed-log stream and persist a log for a
+    // feed it never renders. Everything above — the sound toggle and the
+    // first-gesture audio primer — still runs, which is what the Sound Lab
+    // wants. reviews.html (the only page that ships this module) has
+    // #feed-list, so nothing about the live feed changes.
+    if (!document.querySelector('#feed-list')) return;
+
     // Restore this date's logged feed BEFORE the first scan, and paint it
     // immediately: a refresh or a later visit shows every logged entry on
     // the first paint, and the first poll diffs against the restored

@@ -41,7 +41,116 @@ const MIME_TYPES = {
   '.webp': 'image/webp',
   '.txt': 'text/plain; charset=utf-8',
   '.md': 'text/markdown; charset=utf-8',
+  // Audio: the alert sound slot. Without these, a committed
+  // assets/audio/cha-ching.mp3 is served as application/octet-stream and some
+  // browsers refuse to decode it, silently falling back to the synthesizer.
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.ogg': 'audio/ogg',
+  '.oga': 'audio/ogg',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.flac': 'audio/flac',
+  '.weba': 'audio/webm',
+  '.webm': 'audio/webm',
 };
+
+/* ------------------------------------------------------ the alert-sound slot
+ * The site's alert prefers a REAL cash-register recording installed at
+ * assets/audio/cha-ching.{mp3,wav,ogg,m4a} and falls back to the synthesized
+ * cha-ching when there is none. These endpoints let that recording be
+ * installed by uploading it (from sound-lab.html) instead of by hand-editing
+ * the repository, and let a page ask what is currently installed.
+ *
+ * Everything is confined to AUDIO_DIR with a whitelisted extension, so an
+ * upload can never write outside the audio slot or overwrite site code.
+ */
+const AUDIO_DIR = path.join(REPO_DIR, 'assets', 'audio');
+const AUDIO_STEM = 'cha-ching';
+/** Extension -> the Content-Type the client should have sent. */
+const AUDIO_EXTS = {
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.ogg': 'audio/ogg',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.flac': 'audio/flac',
+};
+/** Same order and same extensions the client probes, so an install is found. */
+const AUDIO_CANDIDATES = ['.mp3', '.wav', '.ogg', '.m4a'];
+const AUDIO_MAX_BYTES = 12 * 1024 * 1024;   // a 1-2 s alert is far smaller
+
+/** The installed recording, or null. First candidate in probe order wins. */
+function installedAlertSound() {
+  for (const ext of AUDIO_CANDIDATES) {
+    const file = path.join(AUDIO_DIR, `${AUDIO_STEM}${ext}`);
+    try {
+      const stats = fs.statSync(file);
+      if (stats.isFile() && stats.size > 0) {
+        return {
+          path: `assets/audio/${AUDIO_STEM}${ext}`,
+          ext,
+          bytes: stats.size,
+          mimeType: AUDIO_EXTS[ext] || 'application/octet-stream',
+          modifiedAt: stats.mtimeMs,
+        };
+      }
+    } catch (_) { /* not installed under this extension */ }
+  }
+  return null;
+}
+
+/** Pick an extension from the upload's filename or Content-Type. */
+function audioExtFor(name, contentType) {
+  const fromName = path.extname(String(name || '')).toLowerCase();
+  if (AUDIO_EXTS[fromName]) return fromName;
+  const byType = Object.keys(AUDIO_EXTS).find((ext) => AUDIO_EXTS[ext] === String(contentType || '').split(';')[0].trim().toLowerCase());
+  return byType || null;
+}
+
+/**
+ * Which audio container these bytes are, or null when they are not a
+ * recognizable one. Checked by magic bytes, because the alternative — a
+ * "looks binary" heuristic — rejects real audio: the first 512 bytes of a
+ * 16-bit PCM WAV are the 44-byte header plus quiet samples, i.e. dense in
+ * bytes below 0x09, which any control-character test reads as "not media".
+ */
+function detectAudioContainer(bytes) {
+  if (bytes.length < 12) return null;
+  const ascii = (from, len) => bytes.toString('ascii', from, from + len);
+  if (ascii(0, 4) === 'RIFF' && ascii(8, 4) === 'WAVE') return 'wav';
+  if (ascii(0, 4) === 'OggS') return 'ogg';
+  if (ascii(0, 4) === 'fLaC') return 'flac';
+  if (ascii(0, 3) === 'ID3') return 'mp3 (ID3-tagged)';
+  if (ascii(4, 4) === 'ftyp') return 'mp4/m4a';
+  if (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) return 'mp3/aac (ADTS)';
+  if (bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3) return 'webm';
+  return null;
+}
+
+/**
+ * True when the bytes are a text document rather than audio. This exists
+ * because some static hosts answer an unknown path with index.html at status
+ * 200; without it the browser would try to decode a web page and fail
+ * confusingly instead of falling back cleanly to the synthesizer.
+ *
+ * An unrecognized file is only rejected on two independent signs: a text
+ * prefix, or a head that is almost entirely printable ASCII. Real audio is
+ * never almost entirely printable ASCII, so a container this server does not
+ * know about is still accepted and left for the browser to decode.
+ */
+function looksLikeText(bytes) {
+  const head = bytes.subarray(0, Math.min(512, bytes.length));
+  let text = '';
+  for (let i = 0; i < head.length; i++) text += String.fromCharCode(head[i]);
+  if (/^\s*(<!doctype html|<html|<head|<\?xml|\{|\[)/i.test(text)) return true;
+  let printable = 0;
+  for (let i = 0; i < head.length; i++) {
+    const b = head[i];
+    if (b === 0x09 || b === 0x0a || b === 0x0d || (b >= 0x20 && b <= 0x7e)) printable += 1;
+  }
+  return printable / head.length > 0.97;
+}
 
 function sendJSON(res, statusCode, data) {
   const body = JSON.stringify(data);
@@ -49,7 +158,7 @@ function sendJSON(res, statusCode, data) {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Accept',
     'Cache-Control': 'no-cache, no-store, must-revalidate',
   });
@@ -256,7 +365,7 @@ const server = http.createServer((req, res) => {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, Accept',
       'Access-Control-Max-Age': '86400',
     });
@@ -387,6 +496,100 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // GET /api/alert-sound — what recording is installed, if any.
+  if (pathname === '/api/alert-sound' && req.method === 'GET') {
+    const installed = installedAlertSound();
+    sendJSON(res, 200, {
+      installed: !!installed,
+      sound: installed,
+      candidates: AUDIO_CANDIDATES.map((ext) => `assets/audio/${AUDIO_STEM}${ext}`),
+      maxBytes: AUDIO_MAX_BYTES,
+      accepted: Object.keys(AUDIO_EXTS),
+    });
+    return;
+  }
+
+  // POST /api/alert-sound — install a recording. The body is the raw file
+  // (not multipart), so the Sound Lab can send exactly the bytes the user
+  // dropped. The extension comes from ?name= or the Content-Type.
+  if (pathname === '/api/alert-sound' && req.method === 'POST') {
+    const ext = audioExtFor(reqUrl.searchParams.get('name'), req.headers['content-type']);
+    if (!ext) {
+      sendError(res, 400,
+        `unsupported audio type — pass ?name=file.${Object.keys(AUDIO_EXTS).map((e) => e.slice(1)).join('|')} ` +
+        'or an audio/* Content-Type');
+      return;
+    }
+    const chunks = [];
+    let total = 0;
+    let aborted = false;
+    req.on('data', (chunk) => {
+      if (aborted) return;
+      total += chunk.length;
+      if (total > AUDIO_MAX_BYTES) {
+        aborted = true;
+        sendError(res, 413, `audio file too large (limit ${AUDIO_MAX_BYTES} bytes)`);
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      if (aborted) return;
+      try {
+        const bytes = Buffer.concat(chunks);
+        if (bytes.length < 512) {
+          sendError(res, 400, 'that is too short to be an audio file (under 512 bytes)');
+          return;
+        }
+        if (looksLikeText(bytes)) {
+          sendError(res, 415, 'that looks like an HTML or text page, not an audio file');
+          return;
+        }
+        const container = detectAudioContainer(bytes);
+        fs.mkdirSync(AUDIO_DIR, { recursive: true });
+        const target = path.join(AUDIO_DIR, `${AUDIO_STEM}${ext}`);
+        // Atomic write, like the feed log: a half-written alert file would
+        // decode-fail in the browser and silently drop back to the synthesizer.
+        const tempPath = `${target}.tmp.${Date.now()}`;
+        fs.writeFileSync(tempPath, bytes);
+        fs.renameSync(tempPath, target);
+        // Only one recording can be the alert, and the client probes in a
+        // fixed order; remove the other extensions so the newest upload is
+        // unambiguously the one that plays.
+        AUDIO_CANDIDATES.forEach((other) => {
+          if (other === ext) return;
+          try { fs.unlinkSync(path.join(AUDIO_DIR, `${AUDIO_STEM}${other}`)); } catch (_) {}
+        });
+        const installed = installedAlertSound();
+        console.log(`[server] installed alert sound: ${installed.path} ` +
+          `(${installed.bytes} bytes, container ${container || 'unrecognized'})`);
+        sendJSON(res, 200, {
+          ok: true,
+          installed: true,
+          sound: installed,
+          // Reported so an unrecognized container is visible rather than
+          // silently written; the browser still gets to try to decode it.
+          container: container || 'unrecognized — saved anyway, the browser decides',
+          note: 'reload any open tab to hear it; commit assets/audio/ to ship it',
+        });
+      } catch (err) {
+        sendError(res, 500, `could not save the alert sound: ${err.message}`);
+      }
+    });
+    return;
+  }
+
+  // DELETE /api/alert-sound — remove the recording, restoring the synthesizer.
+  if (pathname === '/api/alert-sound' && req.method === 'DELETE') {
+    let removed = 0;
+    Object.keys(AUDIO_EXTS).forEach((ext) => {
+      try { fs.unlinkSync(path.join(AUDIO_DIR, `${AUDIO_STEM}${ext}`)); removed += 1; } catch (_) {}
+    });
+    sendJSON(res, 200, { ok: true, installed: false, removed });
+    return;
+  }
+
   // --- Static File Serving ---
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     sendError(res, 405, 'Method not allowed');
@@ -446,6 +649,9 @@ server.listen(PORT, HOST, () => {
   console.log(`[MLB Live PBP Server] listening on http://${HOST}:${PORT}`);
   console.log(`[MLB Live PBP Server] Serving ${REPO_DIR}`);
   console.log(`[MLB Live PBP Server] Feed log persistence directory: ${DATA_DIR}`);
+  const alertSound = installedAlertSound();
+  console.log(`[MLB Live PBP Server] Alert sound: ${alertSound ? alertSound.path : 'not installed — the synthesized cha-ching is in use'}`);
+  console.log(`[MLB Live PBP Server] Sound Lab: http://${HOST}:${PORT}/sound-lab.html`);
 });
 
 process.on('SIGTERM', () => {

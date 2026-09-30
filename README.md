@@ -2,7 +2,7 @@
 
 **Live MLB alert feed for every tracked event — manager challenges, crew-chief/umpire reviews, boundary calls, ABS pitch challenges, official-scorer pending rulings and official scoring changes — all in one complete "All" feed, with cha-ching cash-register alerts and live tracking.**
 
-A copy of [MLB-Live-PBP](https://buffedlizard55-lab.github.io/MLB-Live-PBP/reviews.html) with two intentional differences: **ABS pitch challenges are included in the "All" feed, alert system, and live tracking** (upstream excludes them from All/alerts during the regular season to limit volume), and the alert sound is a synthesized ~1.7-second cha-ching cash-register ring-up (a bright percussive "cha" of key clacks and gear clicks over a rattling bed, a metal bell struck once for the "ching", and the drawer sliding out and thudding to a stop) — see [`docs/alert-sound.md`](docs/alert-sound.md). Other behavior remains aligned with upstream.
+A copy of [MLB-Live-PBP](https://buffedlizard55-lab.github.io/MLB-Live-PBP/reviews.html) with two intentional differences: **ABS pitch challenges are included in the "All" feed, alert system, and live tracking** (upstream excludes them from All/alerts during the regular season to limit volume), and the alert sound is a **cash-register cha-ching** with two paths: it plays a real recording from `assets/audio/cha-ching.{mp3,wav,ogg,m4a}` when one is installed, and otherwise a synthesized ~2-second ring-up (a bright percussive "cha" of a key slam, a gear train and two rattling beds, a metal bell struck once for the "ching", and the drawer sliding out and thudding to a stop) — see [`docs/alert-sound.md`](docs/alert-sound.md) and [`assets/audio/README.md`](assets/audio/README.md). Other behavior remains aligned with upstream.
 
 ---
 
@@ -10,7 +10,7 @@ A copy of [MLB-Live-PBP](https://buffedlizard55-lab.github.io/MLB-Live-PBP/revie
 
 > This block is the standing source of truth for what we are building. Re-read it before every session so every change, suggestion and upgrade stays anchored to it.
 >
-> **Goal.** Copy the MLB-Live-PBP repo and site (https://buffedlizard55-lab.github.io/MLB-Live-PBP/reviews.html). The feed change is that all tracked alerts appear in the All feed, including ABS challenges that upstream excludes during the regular season. A sound customization request changed the alert audio to a synthesized cha-ching cash-register sound. It was built by decoding two real cash-register recordings and measuring them: the "cha" is bright, broadband and full of separate attacks (spectral centroid ~6.1 kHz, flat to within ~2 dB across 150 Hz-6 kHz), the "ching" is an inharmonic bell on a 2093 Hz prime struck ONCE with a ~0.22 s time constant, and the whole alert is audible for ~1.7 seconds. Alert categories, timing, and other behavior remain unchanged. Full record: [`docs/alert-sound.md`](docs/alert-sound.md).
+> **Goal.** Copy the MLB-Live-PBP repo and site (https://buffedlizard55-lab.github.io/MLB-Live-PBP/reviews.html). The feed change is that all tracked alerts appear in the All feed, including ABS challenges that upstream excludes during the regular season. A sound customization request asked for a real cash-register cha-ching. The exact recording turned out to be a paid Bandcamp release (the reference YouTube clip says so in its own description), and no free host is reachable from a build environment, so the alert ships as a **slot plus a fallback**: drop a licensed recording into `assets/audio/` — no code changes, via [`sound-lab.html`](sound-lab.html) — and until then a synthesized cha-ching plays. That fallback was built by decoding two real cash-register recordings and measuring them, then verified against them: the "cha" is bright, broadband and full of separate attacks (spectral centroid 5602 Hz against the references' 6219/6033 Hz, flat to within 1.4 dB across 150 Hz-6 kHz, 3 attacks against their 3 and 10), the "ching" is an inharmonic bell on a 2098 Hz prime struck ONCE, and the alert is audible for 1.33 s above -40 dB and to 2.019 s. Alert categories, timing, and other behavior remain unchanged. Full record: [`docs/alert-sound.md`](docs/alert-sound.md).
 >
 > **Why.** It should solve the problem of having to manually check everything ourselves — one up-to-date, current feed that shows what is happening across the whole slate without hunting.
 >
@@ -52,7 +52,7 @@ Static site (GitHub Pages) that polls the **official MLB StatsAPI** and surfaces
 
 Everything above is **observed from official payloads only** — nothing is predicted, inferred from score deltas, or zero-filled when a counter is absent. Irregularities (e.g. a used-challenge counter moving backwards) are flagged on the affected rows for review, never corrected.
 
-Pages: **Scoreboard** (`index.html`), **Game** (`game.html?gamePk=…` — live PBP, probability props, review tracker), **Replay Feed** (`reviews.html` — the all-games chat-style alert feed with sound + desktop notifications).
+Pages: **Scoreboard** (`index.html`), **Game** (`game.html?gamePk=…` — live PBP, probability props, review tracker), **Replay Feed** (`reviews.html` — the all-games chat-style alert feed with sound + desktop notifications), **Sound Lab** (`sound-lab.html` — audition, measure and install the alert sound).
 
 ## Intentional differences vs. MLB-Live-PBP
 
@@ -93,7 +93,8 @@ node tools/official-scoring-test.mjs
 
 ```
 index.html            Scoreboard page          reviews.html      Replay Feed (all-games alerts)
-game.html             Game page (PBP/reviews)  404.html          not-found
+game.html             Game page (PBP/reviews)  sound-lab.html    audition + install the alert sound
+404.html              not-found                assets/audio/     the recording slot (README + LICENCE)
 assets/js|css         site code + styles       data/             persisted feed logs (per date)
 tools/                test & verification suite (node, no deps)  docs/   verification records
 server.mjs            optional local/dev server + feed-log sync  .github/workflows/ CI (docs/workflows/ = source copies)
@@ -104,10 +105,11 @@ server.mjs            optional local/dev server + feed-log sync  .github/workflo
 1. **Live-API verification runs in CI, not here.** `tools/smoke-test.mjs` (live checks against `statsapi.mlb.com`) could not run inside this build sandbox — outbound TLS to `statsapi.mlb.com` is blocked there (flagged, not skipped silently; the same limitation was recorded in `docs/scoring-changes.md`). All fixture-based tests pass. The live smoke is now wired into CI (`.github/workflows/smoke.yml` — every push/PR + nightly) where the network is open; treat any smoke failure as an irregularity for review.
 2. **Alert volume is the trade-off we accepted.** Including ABS means roughly 4+ extra cha-chings per game (MLB's own 2025 spring data: avg 4.1 challenges/game). Suggested upgrade: per-category sound toggles and/or a short coalescing window so a burst of ABS challenges raises one alert. Currently one alert per poll max + 2.5s cooldown already bounds it.
 3. **Desktop notifications only cover run-at-risk events** (upstream design). Extending them to all alertable events (with batching, already present for run-risk) is the natural next feature.
-4. **First-load audio autoplay.** Browsers block `AudioContext` until the first user interaction; the cha-ching is silent until one click (desktop notifications are not affected).
-5. **Feed persistence is per-browser** (`localStorage`, newest 7 dates). The optional `server.mjs` adds multi-browser sync; on static GitHub Pages, cross-device history is not shared.
-6. **Historical verification docs** (`docs/verification-report.md` etc.) describe the upstream MLB-Live-PBP baseline; the ABS-inclusion delta is recorded in `docs/abs-inclusion.md` and noted at the top of each historical doc.
-7. **Upstream API risk.** The MLB StatsAPI is public but unofficial for third-party use; field shapes and rate limits can change. The test suite is built to fail loudly on drift (see `docs/api-compliance.md`).
+4. **First-load audio autoplay.** Browsers block `AudioContext` until the first user interaction, so a one-time first-gesture primer (`pointerdown`/`keydown`/`touchstart`) creates the context and starts loading the recording; the cha-ching is silent until one click either way (desktop notifications are not affected).
+5. **No audio asset is committed, on purpose.** The cha-ching the request pointed at is a paid Bandcamp release and cannot be copied; the two legally usable recordings found (Pixabay 125042, Pixabay 88639 — the second CC0 underneath) sit behind a JavaScript CDN that a build environment cannot fetch. So `assets/audio/` is a documented slot: install a recording from [`sound-lab.html`](sound-lab.html) or by hand, record its licence in `assets/audio/LICENCE.md`, and commit it. Until then the synthesized fallback plays, and it is measured against real recordings by `tools/render-alert-sound.mjs` (57 checks) and `tools/alert-sound-independent-check.mjs` (15 checks) rather than left unverified.
+6. **Feed persistence is per-browser** (`localStorage`, newest 7 dates). The optional `server.mjs` adds multi-browser sync; on static GitHub Pages, cross-device history is not shared.
+7. **Historical verification docs** (`docs/verification-report.md` etc.) describe the upstream MLB-Live-PBP baseline; the ABS-inclusion delta is recorded in `docs/abs-inclusion.md` and noted at the top of each historical doc.
+8. **Upstream API risk.** The MLB StatsAPI is public but unofficial for third-party use; field shapes and rate limits can change. The test suite is built to fail loudly on drift (see `docs/api-compliance.md`).
 
 ## License
 
