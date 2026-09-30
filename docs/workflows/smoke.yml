@@ -2,6 +2,10 @@ name: API smoke test
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main, 'arena/**']
+  pull_request:
+    branches: [main]
   schedule:
     # nightly sanity check that the upstream data still matches our parsers
     - cron: '17 4 * * *'
@@ -22,6 +26,32 @@ jobs:
       - name: Validate all-games replay feed diff helpers
         run: node tools/reviews-feed-test.mjs
 
+      # The alert sound. Two steps, because the two halves have different
+      # dependency profiles:
+      #   - sound-lab-page-test.mjs has NO dependencies (it statically checks
+      #     the Sound Lab page against the module, the server and the measuring
+      #     tool), so it runs unconditionally and must pass.
+      #   - render-alert-sound.mjs needs web-audio-engine, which is deliberately
+      #     not a dependency of a site that ships with no build step. Locally the
+      #     tool prints that it is skipping and exits 0 when the engine is
+      #     absent, which is right for a developer machine. In CI it is not:
+      #     a silently skipping audio check would look exactly like a passing
+      #     one, so this step fails if no WAV was rendered. GitHub runners have
+      #     npm registry access, so that only happens on a genuine outage - and
+      #     an outage should be visible, not absorbed.
+      - name: Validate the Sound Lab page against the module, the server and the measuring tool
+        run: node tools/sound-lab-page-test.mjs
+
+      - name: Render the alert sound and re-measure it with independent code
+        run: |
+          npm install --no-save web-audio-engine || true
+          node tools/render-alert-sound.mjs alert-sound.wav
+          if [ ! -f alert-sound.wav ]; then
+            echo "::error::web-audio-engine could not be installed, so the alert sound was never rendered. The 57 rendered-PCM checks and the 15 independent re-measurements did NOT run."
+            exit 1
+          fi
+          node tools/alert-sound-independent-check.mjs alert-sound.wav
+
       - name: Render all-games replay feed against captured API payloads
         run: node tools/replay-feed-render-test.mjs
 
@@ -33,6 +63,15 @@ jobs:
 
       - name: Validate the replay feed review-status watcher
         run: node tools/review-watcher-test.mjs
+
+      - name: Validate official scoring-change tracker
+        run: node tools/scoring-change-test.mjs
+
+      - name: Validate official-scorer pending rulings
+        run: node tools/official-scoring-test.mjs
+
+      - name: Validate feed-log persistence
+        run: node tools/feed-log-persistence-test.mjs
 
       - name: Run smoke test against live MLB StatsAPI
         run: node tools/smoke-test.mjs

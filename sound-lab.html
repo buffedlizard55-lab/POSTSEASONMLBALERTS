@@ -1,0 +1,725 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MLB Live PBP — Sound Lab</title>
+  <meta name="description" content="Audition, measure and install the cash-register cha-ching that this site plays for every tracked replay review. Drop in a real recording, or listen to the synthesized fallback and see how it measures.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='46' fill='%23fff' stroke='%23e03131' stroke-width='6'/%3E%3Cpath d='M50 4 A46 46 0 0 1 96 50 M50 96 A46 46 0 0 1 4 50 M4 50 A46 46 0 0 1 50 4 M96 50 A46 46 0 0 1 50 96' stroke='%23e03131' stroke-width='2.5' fill='none'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="assets/css/style.css">
+  <style>
+    /* Scoped to this page: the lab is a workbench, not part of the feed UI. */
+    .lab-main { max-width: 980px; margin: 0 auto; padding: 24px 16px 64px; }
+    .lab-card { background: #16191f; border: 1px solid #2a2f3a; border-radius: 12px;
+                padding: 18px 20px; margin-bottom: 18px; }
+    .lab-card h2 { margin: 0 0 6px; font-size: 1.05rem; letter-spacing: .02em; }
+    .lab-card p.lede { margin: 0 0 14px; color: #9aa4b2; font-size: .9rem; line-height: 1.5; }
+    .lab-state { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    .lab-pill { padding: 5px 11px; border-radius: 999px; font-size: .8rem; font-weight: 600;
+                border: 1px solid transparent; }
+    .lab-pill.ok   { background: #12351f; color: #63e6a0; border-color: #1f5c36; }
+    .lab-pill.warn { background: #3a2d12; color: #ffd43b; border-color: #6b5320; }
+    .lab-pill.info { background: #14243a; color: #74c0fc; border-color: #23456e; }
+    .lab-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+    .lab-btn { background: #2b3240; color: #e6e9ef; border: 1px solid #3b4353; border-radius: 9px;
+               padding: 9px 15px; font-size: .88rem; font-weight: 600; cursor: pointer; }
+    .lab-btn:hover:not(:disabled) { background: #363e4e; }
+    .lab-btn:disabled { opacity: .45; cursor: not-allowed; }
+    .lab-btn.primary { background: #c92a2a; border-color: #e03131; }
+    .lab-btn.primary:hover:not(:disabled) { background: #e03131; }
+    .lab-drop { border: 2px dashed #3b4353; border-radius: 12px; padding: 30px 18px;
+                text-align: center; color: #9aa4b2; transition: background .15s, border-color .15s;
+                cursor: pointer; }
+    .lab-drop.hot { border-color: #74c0fc; background: #14243a; color: #d0ebff; }
+    .lab-drop strong { color: #e6e9ef; }
+    .lab-table { width: 100%; border-collapse: collapse; font-size: .86rem; }
+    .lab-table th, .lab-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #232833; }
+    .lab-table th { color: #9aa4b2; font-weight: 600; white-space: nowrap; }
+    .lab-table td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .lab-table tr.hit td.num { color: #63e6a0; }
+    .lab-table tr.miss td.num { color: #ffa8a8; }
+    .lab-env { display: flex; align-items: flex-end; gap: 1px; height: 90px; margin-top: 12px;
+               background: #101319; border-radius: 8px; padding: 6px; overflow: hidden; }
+    .lab-env i { flex: 1 1 auto; min-width: 1px; background: linear-gradient(#74c0fc, #3b5bdb);
+                 border-radius: 1px 1px 0 0; display: block; }
+    .lab-env-legend { color: #9aa4b2; font-size: .78rem; margin-top: 6px; }
+    .lab-log { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem;
+               color: #9aa4b2; white-space: pre-wrap; min-height: 20px; margin-top: 10px; }
+    .lab-log.err { color: #ffa8a8; }
+    .lab-note { font-size: .82rem; color: #9aa4b2; line-height: 1.55; }
+    .lab-note code { background: #101319; padding: 1px 5px; border-radius: 4px; color: #d0ebff; }
+    .lab-note a { color: #74c0fc; }
+    .lab-sources li { margin-bottom: 8px; }
+  </style>
+</head>
+<body class="page-lab">
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-ball">⚾</span>
+      <span>MLB Live PBP</span>
+      <span class="brand-sub">sound lab · the cha-ching</span>
+    </div>
+    <a class="btn btn-ghost" href="reviews.html">← Replay Feed</a>
+    <div class="feed-controls">
+      <button id="lab-sound-toggle" class="btn btn-ghost">🔇 Sound Off</button>
+    </div>
+  </header>
+
+  <main class="lab-main">
+
+    <!-- ---------------------------------------------------------------- -->
+    <section class="lab-card">
+      <h2>What the site is playing right now</h2>
+      <p class="lede">
+        One alert sound for the whole page: a cash-register <em>cha-ching</em>. It prefers a real
+        recording installed under <code>assets/audio/</code> and falls back to a synthesized
+        cha-ching when there is none, so a fresh clone is never silent.
+      </p>
+      <div class="lab-state" id="lab-state"></div>
+      <div class="lab-row">
+        <button class="lab-btn primary" id="btn-play-alert">▶ Play the alert as the site plays it</button>
+        <button class="lab-btn" id="btn-play-recording" disabled>▶ Recording only</button>
+        <button class="lab-btn" id="btn-play-synth">▶ Synthesized cha-ching only</button>
+        <button class="lab-btn" id="btn-reprobe">↻ Re-probe for a recording</button>
+      </div>
+      <div class="lab-log" id="lab-log"></div>
+      <p class="lab-note" style="margin-top:10px">
+        “Play the alert as the site plays it” goes through the real code path
+        (<code>ReplayFeed.playAlertSound()</code>), so it obeys the same 2.5&nbsp;s cooldown that
+        stops overlapping alerts when several games report at once. The two “only” buttons bypass
+        the cooldown so you can A/B them back to back.
+      </p>
+    </section>
+
+    <!-- ---------------------------------------------------------------- -->
+    <section class="lab-card">
+      <h2>Install a real recording</h2>
+      <p class="lede">
+        Drop a file, audition it, look at how it measures, then install it. Installing writes
+        <code>assets/audio/cha-ching.&lt;ext&gt;</code> on the server — no code changes, and
+        <code>git add</code> it afterwards to ship it to everyone.
+      </p>
+      <div class="lab-drop" id="lab-drop">
+        <strong>Drop a cha-ching here</strong> — or click to choose a file<br>
+        mp3 · wav · ogg · m4a · aac · flac — 1–2&nbsp;s is the design target, 12&nbsp;MB upload cap
+      </div>
+      <input type="file" id="lab-file" accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac" hidden>
+      <div class="lab-row">
+        <button class="lab-btn" id="btn-audition" disabled>▶ Audition this file</button>
+        <button class="lab-btn primary" id="btn-install" disabled>⬇ Install on this server</button>
+        <button class="lab-btn" id="btn-remove" disabled>✕ Remove installed recording</button>
+      </div>
+      <div class="lab-log" id="lab-drop-log"></div>
+      <p class="lab-note" style="margin-top:10px" id="lab-upload-note"></p>
+    </section>
+
+    <!-- ---------------------------------------------------------------- -->
+    <section class="lab-card">
+      <h2>How it measures</h2>
+      <p class="lede">
+        The same measurements <code>tools/render-alert-sound.mjs</code> makes, computed in the
+        browser on the decoded PCM: identical frame sizes, identical windows, identical FFT
+        (2048-point Hann, 1024 hop), so these numbers are directly comparable to that tool's and
+        to the reference column.
+      </p>
+      <table class="lab-table">
+        <thead>
+          <tr><th>Measurement</th><th>This file</th><th>Real recording</th><th>What it means</th></tr>
+        </thead>
+        <tbody id="lab-metrics"></tbody>
+      </table>
+      <div class="lab-env" id="lab-env"></div>
+      <div class="lab-env-legend" id="lab-env-legend">Envelope — drop a file to see it.</div>
+    </section>
+
+    <!-- ---------------------------------------------------------------- -->
+    <section class="lab-card">
+      <h2>Where to get one you are allowed to ship</h2>
+      <p class="lede">
+        The video this request came from — YouTube <code>trR5YxZjfes</code>, channel
+        <em>cashregistersound</em> — links in its own description to a <strong>paid Bandcamp
+        release</strong>. It is not free to copy, and nothing here is ripped from it. These two
+        were checked page by page:
+      </p>
+      <ul class="lab-note lab-sources">
+        <li>
+          <a href="https://pixabay.com/sound-effects/film-special-effects-cash-register-kaching-sound-effect-125042/"
+             rel="noopener noreferrer">Cash Register (Kaching) — Sound Effect</a>,
+          Modestas123123, 0:03, Pixabay Content Licence. The closest freely hosted match to the
+          reference video — same class of stock SFX, same title pattern.
+        </li>
+        <li>
+          <a href="https://pixabay.com/sound-effects/film-special-effects-cash-register-fake-88639/"
+             rel="noopener noreferrer">Cash Register Fake</a>,
+          freesound_community / CapsLok, 0:02, Pixabay Content Licence — and the underlying
+          <a href="https://freesound.org/people/CapsLok/sounds/184438/" rel="noopener noreferrer">Freesound 184438</a>
+          is <strong>CC0</strong>, so this is the more conservatively licensed of the two.
+        </li>
+      </ul>
+      <p class="lab-note">
+        Pixabay Content Licence (<a href="https://pixabay.com/service/license-summary/"
+        rel="noopener noreferrer">summary</a>): free for commercial use, no attribution required,
+        may not be sold or redistributed standalone. No account needed to download a sound effect.
+        Whichever you use, record it in <code>assets/audio/LICENCE.md</code> before committing —
+        see <code>assets/audio/README.md</code>.
+      </p>
+      <p class="lab-note">
+        Neither is <em>the</em> video's sound. Nothing freely hosted is; the exact recording has to
+        be bought from that Bandcamp release, and then its own terms decide whether it can ship in
+        a public repository.
+      </p>
+    </section>
+
+  </main>
+
+  <script src="assets/js/api.js"></script>
+  <script src="assets/js/ui.js"></script>
+  <script src="assets/js/reviews.js"></script>
+  <script src="assets/js/feed-log.js"></script>
+  <!-- Loaded for its audio alone. The module skips its feed bootstrap on a page
+       with no #feed-list, so this workbench never polls statsapi. -->
+  <script src="assets/js/reviews-feed.js"></script>
+  <script>
+  (function () {
+    'use strict';
+
+    var RF = window.ReplayFeed;
+    var $ = function (id) { return document.getElementById(id); };
+
+    /* ------------------------------------------------------------- state */
+    var soundOn = false;
+    var serverMode = 'unknown';      // 'server' | 'static'
+    var dropped = null;              // { name, bytes, buffer }
+    var installedInfo = null;        // from GET /api/alert-sound
+
+    function log(msg, isErr) {
+      var el = $('lab-log');
+      el.textContent = msg;
+      el.className = 'lab-log' + (isErr ? ' err' : '');
+    }
+    function dropLog(msg, isErr) {
+      var el = $('lab-drop-log');
+      el.textContent = msg;
+      el.className = 'lab-log' + (isErr ? ' err' : '');
+    }
+
+    /* =====================================================================
+     * Measurement. Ported from tools/render-alert-sound.mjs so the numbers on
+     * this page mean exactly what that tool means: same dB reference, same
+     * frame lengths, same plateau window, same FFT size and window function.
+     * ===================================================================*/
+
+    function db(v) { return v > 0 ? 20 * Math.log10(v) : -140; }
+
+    /** True peak across every channel — what the install gain normalizes to. */
+    function peakOfBuffer(buffer) {
+      var peak = 0;
+      for (var c = 0; c < buffer.numberOfChannels; c++) {
+        var d = buffer.getChannelData(c);
+        for (var i = 0; i < d.length; i++) {
+          var v = d[i] < 0 ? -d[i] : d[i];
+          if (v > peak) peak = v;
+        }
+      }
+      return peak;
+    }
+
+    /** Percentile of an array of dB values. Same index rule as the tool. */
+    function percentile(values, p) {
+      if (!values.length) return -140;
+      var sorted = values.slice().sort(function (a, b) { return a - b; });
+      return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
+    }
+
+    function mean(a) {
+      return a.reduce(function (x, y) { return x + y; }, 0) / Math.max(1, a.length);
+    }
+    function stddev(a) {
+      return Math.sqrt(a.reduce(function (x, y) { return x + (y - mean(a)) * (y - mean(a)); }, 0) /
+                       Math.max(1, a.length));
+    }
+
+    /** Non-overlapping RMS frames of `frameSec`, as { t, db } with t the frame
+     *  CENTRE. This is frames25()/frames2() in the tool, one function. */
+    function framesN(x, sr, fromSec, toSec, frameSec) {
+      var frame = Math.round(frameSec * sr);
+      var out = [];
+      var i0 = Math.max(0, Math.floor(fromSec * sr));
+      var i1 = Math.min(x.length, Math.floor(toSec * sr));
+      for (var i = i0; i + frame <= i1; i += frame) {
+        var sum = 0;
+        for (var k = 0; k < frame; k++) sum += x[i + k] * x[i + k];
+        out.push({ t: (i + frame / 2) / sr, db: db(Math.sqrt(sum / frame)) });
+      }
+      return out;
+    }
+
+    /** RMS envelope over the WHOLE file (the tool's envelope()). */
+    function envelope(x, sr, frameSec) {
+      var hop = Math.floor(frameSec * sr);
+      var out = [];
+      for (var i = 0; i + hop <= x.length; i += hop) {
+        var sum = 0;
+        for (var k = i; k < i + hop; k++) sum += x[k] * x[k];
+        out.push({ t: (i + hop / 2) / sr, db: db(Math.sqrt(sum / hop)) });
+      }
+      return out;
+    }
+
+    /** Averaged magnitude spectrum: 2048-pt Hann FFT, 1024 hop — verbatim the
+     *  tool's averageSpectrum(), including its loop bounds, so a centroid on
+     *  this page is the same number as a centroid in that tool. */
+    function averageSpectrum(x, sr, fromSec, toSec) {
+      var N = 2048;
+      if (x.length < N) return null;
+      var i0 = Math.max(0, Math.floor(fromSec * sr));
+      var i1 = Math.min(x.length - N, Math.floor(toSec * sr));
+      var hop = N / 2;
+      var win = new Float64Array(N);
+      for (var w = 0; w < N; w++) win[w] = 0.5 - 0.5 * Math.cos((2 * Math.PI * w) / (N - 1));
+      var acc = new Float64Array(N / 2);
+      var count = 0;
+      for (var start = i0; start + N < i1; start += hop) {
+        var re = new Float64Array(N);
+        var im = new Float64Array(N);
+        for (var i = 0; i < N; i++) re[i] = x[start + i] * win[i];
+        for (var a = 1, j = 0; a < N; a++) {
+          var bit = N >> 1;
+          for (; j & bit; bit >>= 1) j ^= bit;
+          j ^= bit;
+          if (a < j) {
+            var tr = re[a]; re[a] = re[j]; re[j] = tr;
+            var ti = im[a]; im[a] = im[j]; im[j] = ti;
+          }
+        }
+        for (var len = 2; len <= N; len <<= 1) {
+          var ang = (-2 * Math.PI) / len;
+          for (var b = 0; b < N; b += len) {
+            for (var k = 0; k < len / 2; k++) {
+              var wr = Math.cos(ang * k), wi = Math.sin(ang * k);
+              var ur = re[b + k], ui = im[b + k];
+              var er = re[b + k + len / 2], ei = im[b + k + len / 2];
+              var vr = er * wr - ei * wi;
+              var vi = er * wi + ei * wr;
+              re[b + k] = ur + vr; im[b + k] = ui + vi;
+              re[b + k + len / 2] = ur - vr; im[b + k + len / 2] = ui - vi;
+            }
+          }
+        }
+        for (var q = 0; q < N / 2; q++) acc[q] += Math.sqrt(re[q] * re[q] + im[q] * im[q]);
+        count++;
+      }
+      return count ? { acc: acc, N: N, sr: sr, frames: count } : null;
+    }
+
+    function spectralCentroid(spec) {
+      if (!spec) return 0;
+      var num = 0, den = 0;
+      for (var i = 1; i < spec.N / 2; i++) {
+        var m = spec.acc[i] * spec.acc[i];
+        num += m * ((i * spec.sr) / spec.N);
+        den += m;
+      }
+      return den > 0 ? num / den : 0;
+    }
+
+    /** Separate attacks the ear gets: 4 ms rises of >= 6 dB, on a 2 ms
+     *  envelope taken over the whole file and then windowed — the tool's
+     *  countAttacks(), whose index alignment depends on doing it in that order. */
+    function countAttacks(x, sr, fromSec, toSec) {
+      var env = envelope(x, sr, 0.002).filter(function (f) {
+        return f.t >= fromSec && f.t <= toSec;
+      });
+      var attacks = 0;
+      for (var i = 2; i < env.length; i++) if (env[i].db - env[i - 2].db >= 6) attacks++;
+      return attacks;
+    }
+
+    /* Reference figures, measured from a real cash-register cha-ching
+     * recording decoded to PCM at 48 kHz. Method and provenance:
+     * docs/alert-sound.md §2. These are the numbers the synthesized fallback
+     * is verified against, and the yardstick for a recording you drop in. */
+    var REF = {
+      bodyP90: -6.5,          // p90 of 25 ms frames over 0-0.6 s
+      loudestFrame: -6.3,     // loudest 25 ms frame, 0 -> strike
+      peak: -0.0,             // hard-limited in mastering
+      peakToBody: 6.5,
+      audible40: 1.070,       // span of 10 ms frames above -40 dB
+      onsetRise: 14.7,        // first 25 ms frame -> loudest, 0 -> strike
+      plateauSpread: 1.06,    // p95-p50 of 2 ms frames, 0.05 s -> strike
+      plateauStd: 1.80,
+      plateauP50: -7.2,
+      attacks: 3,
+      centroid: 6033          // Hz; a second reference measured 6219 Hz
+    };
+    var SPEC = (RF && RF.alertSoundSpec) || null;
+    var STRIKE_AT = SPEC && SPEC.bellStrikes && SPEC.bellStrikes[0] ? SPEC.bellStrikes[0].at : 0.5;
+    var PLATEAU_FROM = 0.05;
+
+    /**
+     * Every figure below is computed the way tools/render-alert-sound.mjs
+     * computes it, on channel 0 — the same channel that tool renders and
+     * measures. Only the peak looks at all channels, because that is what
+     * installAlertSample() normalizes.
+     */
+    function analyse(buffer) {
+      var sr = buffer.sampleRate;
+      var x = buffer.getChannelData(0);
+      var dur = buffer.duration;
+      var out = { duration: dur, sampleRate: sr, channels: buffer.numberOfChannels };
+
+      out.peakDb = db(peakOfBuffer(buffer));
+
+      var cha25 = framesN(x, sr, 0, Math.min(STRIKE_AT, dur), 0.025);
+      var head25 = framesN(x, sr, 0, Math.min(0.6, dur), 0.025);
+      out.bodyP90 = percentile(head25.map(function (f) { return f.db; }), 0.90);
+      out.loudestFrame = cha25.length
+        ? Math.max.apply(null, cha25.map(function (f) { return f.db; })) : -140;
+      out.peakToBody = out.peakDb - out.bodyP90;
+      out.onsetRise = cha25.length ? out.loudestFrame - cha25[0].db : 0;
+
+      var env10 = envelope(x, sr, 0.010).filter(function (f) { return f.t > 0.005; });
+      var audible = env10.filter(function (f) { return f.db > -40; });
+      out.audible40 = audible.length
+        ? audible[audible.length - 1].t - audible[0].t : 0;
+
+      var plateau = framesN(x, sr, PLATEAU_FROM, Math.min(STRIKE_AT, dur), 0.002)
+        .map(function (f) { return f.db; });
+      out.plateauSpread = percentile(plateau, 0.95) - percentile(plateau, 0.50);
+      out.plateauStd = stddev(plateau);
+      out.plateauP50 = percentile(plateau, 0.50);
+
+      out.attacks = countAttacks(x, sr, 0, Math.min(STRIKE_AT, dur));
+      out.centroid = spectralCentroid(averageSpectrum(x, sr, 0, Math.min(STRIKE_AT, dur)));
+
+      // Envelope for the chart: 10 ms frames across the whole file.
+      out.envelope = envelope(x, sr, 0.01).map(function (f) { return f.db; });
+      return out;
+    }
+
+    /* ------------------------------------------------------- metrics view */
+    var METRICS = [
+      { key: 'duration', label: 'Length', unit: ' s', digits: 3, ref: null,
+        note: '1–2 s is the design target' },
+      { key: 'peakDb', label: 'Peak', unit: ' dBFS', digits: 1, ref: REF.peak,
+        note: 'normalized to −2.0 dBFS on install' },
+      { key: 'bodyP90', label: 'Body level (p90, first 0.6 s)', unit: ' dB', digits: 1, ref: REF.bodyP90,
+        note: 'how loud the machine actually is' },
+      { key: 'loudestFrame', label: 'Loudest 25 ms frame', unit: ' dB', digits: 1, ref: REF.loudestFrame,
+        note: 'the peak level of the “cha”' },
+      { key: 'peakToBody', label: 'Peak minus body', unit: ' dB', digits: 1, ref: REF.peakToBody,
+        note: 'small = dense; large = spikes over silence' },
+      { key: 'audible40', label: 'Audible above −40 dB', unit: ' s', digits: 3, ref: REF.audible40,
+        note: 'genuinely audible length, not file length' },
+      { key: 'onsetRise', label: 'Onset rise (first frame → loudest)', unit: ' dB', digits: 1, ref: REF.onsetRise,
+        note: 'a real “cha” ramps; a hiss does not' },
+      { key: 'plateauSpread', label: 'Plateau texture (p95−p50, 2 ms)', unit: ' dB', digits: 2, ref: REF.plateauSpread,
+        note: '~0 is a hiss, >3 is isolated spikes' },
+      { key: 'plateauStd', label: 'Plateau std dev', unit: ' dB', digits: 2, ref: REF.plateauStd,
+        note: 'how much the mechanism varies' },
+      { key: 'plateauP50', label: 'Plateau level (p50)', unit: ' dB', digits: 1, ref: REF.plateauP50,
+        note: 'the single number a weak “cha” gets worst' },
+      { key: 'attacks', label: 'Attacks (4 ms rises ≥ 6 dB)', unit: '', digits: 0, ref: REF.attacks,
+        note: 'separate mechanical events the ear gets' },
+      { key: 'centroid', label: 'Spectral centroid of the “cha”', unit: ' Hz', digits: 0, ref: REF.centroid,
+        note: 'brightness; ~3300 Hz sounds dull by comparison' }
+    ];
+
+    function renderMetrics(m) {
+      var tbody = $('lab-metrics');
+      tbody.textContent = '';
+      METRICS.forEach(function (row) {
+        var v = m[row.key];
+        var tr = document.createElement('tr');
+        var cls = '';
+        if (row.ref !== null && typeof v === 'number') {
+          // Within 3 dB (or ±1 attack, ±900 Hz) of the reference counts as a match.
+          var tol = row.key === 'attacks' ? 1 : row.key === 'centroid' ? 900 : 3;
+          cls = Math.abs(v - row.ref) <= tol ? 'hit' : 'miss';
+        }
+        tr.className = cls;
+        var th = document.createElement('th');
+        th.scope = 'row';
+        th.textContent = row.label;
+        var tdV = document.createElement('td');
+        tdV.className = 'num';
+        tdV.textContent = typeof v === 'number'
+          ? v.toFixed(row.digits) + row.unit
+          : '—';
+        var tdR = document.createElement('td');
+        tdR.className = 'num';
+        tdR.textContent = row.ref === null ? '—' : row.ref + row.unit;
+        var tdN = document.createElement('td');
+        tdN.textContent = row.note;
+        tdN.style.color = '#9aa4b2';
+        tr.appendChild(th); tr.appendChild(tdV); tr.appendChild(tdR); tr.appendChild(tdN);
+        tbody.appendChild(tr);
+      });
+    }
+
+    function renderEnvelope(envDb, label) {
+      var host = $('lab-env');
+      host.textContent = '';
+      if (!envDb || !envDb.length) {
+        $('lab-env-legend').textContent = 'Envelope — drop a file to see it.';
+        return;
+      }
+      var MAX = 0, MIN = -60;
+      var bars = Math.min(envDb.length, 600);
+      var step = envDb.length / bars;
+      for (var i = 0; i < bars; i++) {
+        var v = envDb[Math.floor(i * step)];
+        var h = Math.max(1, Math.round(((v - MIN) / (MAX - MIN)) * 100));
+        var bar = document.createElement('i');
+        bar.style.height = Math.min(100, h) + '%';
+        bar.title = (i * step * 0.01).toFixed(2) + ' s: ' + v.toFixed(1) + ' dB';
+        host.appendChild(bar);
+      }
+      $('lab-env-legend').textContent = label +
+        ' — 10 ms frames, 0 dB at the top, −60 dB at the bottom, ' +
+        (envDb.length * 0.01).toFixed(2) + ' s across.';
+    }
+
+    /* --------------------------------------------------------- state view */
+    function pill(text, kind) {
+      var span = document.createElement('span');
+      span.className = 'lab-pill ' + kind;
+      span.textContent = text;
+      return span;
+    }
+
+    function renderState() {
+      var host = $('lab-state');
+      host.textContent = '';
+      var sample = RF && RF.getAlertSample ? RF.getAlertSample() : null;
+
+      if (sample) {
+        host.appendChild(pill('● Real recording in use', 'ok'));
+        host.appendChild(pill(sample.url, 'info'));
+        host.appendChild(pill(sample.duration.toFixed(2) + ' s · ' +
+          sample.sampleRate + ' Hz · ' + sample.channels + ' ch', 'info'));
+        host.appendChild(pill('playback gain ' + sample.gain.toFixed(2) + '×', 'info'));
+        $('btn-play-recording').disabled = false;
+        $('btn-remove').disabled = serverMode !== 'server';
+      } else {
+        host.appendChild(pill('● Synthesized cha-ching in use', 'warn'));
+        host.appendChild(pill('no recording at assets/audio/cha-ching.*', 'info'));
+        $('btn-play-recording').disabled = true;
+        $('btn-remove').disabled = true;
+      }
+      host.appendChild(pill(serverMode === 'server'
+        ? 'server.mjs connected — installing will persist'
+        : 'static hosting — installs are session-only', serverMode === 'server' ? 'ok' : 'info'));
+    }
+
+    /* ------------------------------------------------------ server status */
+    function refreshServerState() {
+      return fetch('api/alert-sound', { cache: 'no-store' })
+        .then(function (res) { return res.ok ? res.json() : Promise.reject(new Error('HTTP ' + res.status)); })
+        .then(function (data) {
+          serverMode = 'server';
+          installedInfo = data.sound;
+          $('lab-upload-note').innerHTML = data.installed
+            ? 'Installed on this server: <code>' + data.sound.path + '</code> (' +
+              data.sound.bytes + ' bytes). Commit it with <code>git add ' + data.sound.path +
+              '</code> to ship it.'
+            : 'No recording installed on this server yet. Candidates probed: <code>' +
+              data.candidates.join('</code>, <code>') + '</code>.';
+          renderState();
+        })
+        .catch(function () {
+          serverMode = 'static';
+          installedInfo = null;
+          $('lab-upload-note').innerHTML =
+            'This page is not being served by <code>server.mjs</code>, so there is no upload ' +
+            'endpoint: a file you drop here is adopted for this session only. To ship it, copy it ' +
+            'to <code>assets/audio/cha-ching.mp3</code> yourself — see ' +
+            '<code>assets/audio/README.md</code>.';
+          $('btn-install').disabled = true;
+          renderState();
+        });
+    }
+
+    /* --------------------------------------------------------- audio gate */
+    function ensureSound() {
+      if (!soundOn && RF && RF.setSoundEnabled) {
+        // A user gesture is required before an AudioContext will start; every
+        // button here is one, so turn the sound on the first time any is used.
+        RF.setSoundEnabled(true);
+        soundOn = RF.getSoundEnabled();
+        $('lab-sound-toggle').textContent = soundOn ? '🔊 Sound On' : '🔇 Sound Off';
+      }
+      return soundOn;
+    }
+
+    /* ------------------------------------------------------------- wiring */
+    $('lab-sound-toggle').addEventListener('click', function () {
+      if (!RF) return;
+      soundOn = !RF.getSoundEnabled();
+      RF.setSoundEnabled(soundOn);
+      soundOn = RF.getSoundEnabled();
+      this.textContent = soundOn ? '🔊 Sound On' : '🔇 Sound Off';
+      log(soundOn ? 'Sound on. The toggle previews the alert immediately.' : 'Sound off.');
+      renderState();
+    });
+
+    $('btn-play-alert').addEventListener('click', function () {
+      if (!ensureSound()) { log('Audio is unavailable in this browser.', true); return; }
+      RF.playAlertSound();
+      log('Played through ReplayFeed.playAlertSound() — the real path. ' +
+          'Blocked for 2.5 s afterwards by the shared cooldown.');
+      renderState();
+    });
+
+    $('btn-play-synth').addEventListener('click', function () {
+      if (!ensureSound()) { log('Audio is unavailable in this browser.', true); return; }
+      var ok = RF.playSynthAlertNow();
+      log(ok ? 'Played the synthesized cha-ching (the fallback), bypassing the cooldown.'
+             : 'Could not start an AudioContext.', !ok);
+    });
+
+    $('btn-play-recording').addEventListener('click', function () {
+      if (!ensureSound()) { log('Audio is unavailable in this browser.', true); return; }
+      var ok = RF.playAlertSampleNow();
+      log(ok ? 'Played the installed recording only.' : 'No recording is installed.', !ok);
+    });
+
+    $('btn-reprobe').addEventListener('click', function () {
+      if (!RF) return;
+      RF.clearAlertSample();
+      RF.primeAlertSound().then(function () {
+        renderState();
+        var s = RF.getAlertSample();
+        log(s ? 'Found a recording at ' + s.url + '.' : 'No recording found — the synthesizer stays in charge.');
+        return refreshServerState();
+      });
+    });
+
+    /* ------------------------------------------------------ drop / choose */
+    var dropZone = $('lab-drop');
+    var fileInput = $('lab-file');
+
+    dropZone.addEventListener('click', function () { fileInput.click(); });
+    fileInput.addEventListener('change', function () {
+      if (fileInput.files && fileInput.files[0]) adoptFile(fileInput.files[0]);
+    });
+    ['dragenter', 'dragover'].forEach(function (type) {
+      dropZone.addEventListener(type, function (e) {
+        e.preventDefault(); dropZone.classList.add('hot');
+      });
+    });
+    ['dragleave', 'drop'].forEach(function (type) {
+      dropZone.addEventListener(type, function (e) {
+        e.preventDefault(); dropZone.classList.remove('hot');
+      });
+    });
+    dropZone.addEventListener('drop', function (e) {
+      var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f) adoptFile(f);
+    });
+    // A file dropped anywhere else on the page should still work.
+    window.addEventListener('dragover', function (e) { e.preventDefault(); });
+    window.addEventListener('drop', function (e) { e.preventDefault(); });
+
+    function adoptFile(file) {
+      dropped = null;
+      $('btn-audition').disabled = true;
+      $('btn-install').disabled = true;
+      dropLog('Reading ' + file.name + ' (' + file.size + ' bytes)…');
+      file.arrayBuffer().then(function (bytes) {
+        // setAlertSampleFromBytes copies before decoding, because
+        // decodeAudioData detaches the buffer it is handed.
+        return RF.setAlertSampleFromBytes(bytes, file.name).then(function (installed) {
+          if (!installed) {
+            dropLog('Refused: ' + file.name + ' is not audio this browser can decode, is under ' +
+                    '512 bytes, or looks like an HTML page.', true);
+            return null;
+          }
+          dropped = { name: file.name, bytes: bytes };
+          // Decode our own copy for measurement (the module's was consumed).
+          var Ctx = window.AudioContext || window.webkitAudioContext;
+          var ctx = new Ctx();
+          return ctx.decodeAudioData(bytes.slice(0)).then(function (buffer) {
+            ctx.close && ctx.close();
+            var m = analyse(buffer);
+            renderMetrics(m);
+            renderEnvelope(m.envelope, file.name);
+            dropLog('Adopted ' + file.name + ' as the alert for this session — ' +
+                    m.duration.toFixed(2) + ' s, peak ' + m.peakDb.toFixed(1) +
+                    ' dBFS, playback gain ' + installed.gain.toFixed(2) + '×. ' +
+                    'Audition it, then install it to keep it.');
+            $('btn-audition').disabled = false;
+            $('btn-install').disabled = serverMode !== 'server';
+            renderState();
+            return m;
+          });
+        });
+      }).catch(function (err) {
+        dropLog('Could not read that file: ' + (err && err.message ? err.message : err), true);
+      });
+    }
+
+    $('btn-audition').addEventListener('click', function () {
+      if (!ensureSound()) return;
+      RF.playAlertSampleNow();
+    });
+
+    $('btn-install').addEventListener('click', function () {
+      if (!dropped) return;
+      var btn = this;
+      btn.disabled = true;
+      dropLog('Installing ' + dropped.name + ' on this server…');
+      fetch('api/alert-sound?name=' + encodeURIComponent(dropped.name), {
+        method: 'POST',
+        headers: { 'Content-Type': 'audio/mpeg' },
+        body: dropped.bytes
+      }).then(function (res) {
+        return res.json().then(function (data) { return { ok: res.ok, data: data }; });
+      }).then(function (r) {
+        if (!r.ok) throw new Error(r.data && r.data.error ? r.data.error : 'HTTP error');
+        dropLog('Installed ' + r.data.sound.path + ' (' + r.data.sound.bytes + ' bytes). ' +
+                'Reload any other open tab to hear it. Commit it with: git add ' +
+                r.data.sound.path + ' assets/audio/LICENCE.md');
+        return refreshServerState().then(function () {
+          RF.clearAlertSample();
+          return RF.primeAlertSound();
+        }).then(function () { renderState(); });
+      }).catch(function (err) {
+        dropLog('Install failed: ' + err.message, true);
+        btn.disabled = false;
+      });
+    });
+
+    $('btn-remove').addEventListener('click', function () {
+      if (!confirm('Remove the installed recording? The site falls back to the synthesized cha-ching.')) return;
+      fetch('api/alert-sound', { method: 'DELETE' })
+        .then(function (res) { return res.json(); })
+        .then(function () {
+          RF.clearAlertSample();
+          dropLog('Removed. The synthesized cha-ching is back in charge.');
+          return refreshServerState();
+        })
+        .catch(function (err) { dropLog('Remove failed: ' + err.message, true); });
+    });
+
+    /* ------------------------------------------------------------- boot */
+    if (!RF) {
+      log('ReplayFeed did not load — this page needs assets/js/reviews-feed.js.', true);
+      return;
+    }
+    renderMetrics({});
+    refreshServerState().then(function () {
+      // Adopt whatever is already installed, without playing anything: an
+      // AudioContext created before a gesture starts suspended.
+      return RF.primeAlertSound();
+    }).then(function () {
+      renderState();
+      var s = RF.getAlertSample();
+      log(s ? 'Installed recording found: ' + s.url + ' (' + s.duration.toFixed(2) + ' s).'
+            : 'No recording installed — the site is using the synthesized cha-ching. ' +
+              'Drop one below, or listen with “Synthesized cha-ching only”.');
+    }).catch(function () { renderState(); });
+  })();
+  </script>
+</body>
+</html>

@@ -72,6 +72,14 @@ function loadShippedModule(offlineContext) {
   const context = {
     console: { warn() {}, error() {}, log() {} },
     Map, Set, Date, Number, String, Object, Array, URLSearchParams,
+    // The HOST's typed arrays, not the VM's own. web-audio-engine silently
+    // REJECTS a cross-realm Float32Array assigned to WaveShaperNode.curve — the
+    // property reads back null and the node passes audio straight through, so
+    // the render would measure a graph with no soft-clipper in it while still
+    // reporting every check as passed. Real browsers accept any Float32Array,
+    // so this is purely a harness correctness fix; the guard in section 0 below
+    // fails the run if it ever regresses.
+    Float32Array, Float64Array, Uint8Array, Int16Array, Uint32Array,
     Math: seededMath,
     CSS: { escape: (s) => s },
     UI: { el: () => ({}), clear: () => ({}) },
@@ -154,6 +162,43 @@ function toneLevel(samples, fromSec, seconds, frequency) {
   return Math.sqrt(Math.max(0, s1 * s1 + s2 * s2 - coeff * s1 * s2)) / (n / 2);
 }
 
+/** Percentile of an array of dB values. */
+function percentile (values, p) {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
+}
+
+/** 25 ms RMS frames, as { t, db } — the resolution the reference was measured at. */
+function frames25 (samples, fromSec, toSec) {
+  const frame = Math.round(0.025 * SR);
+  const out = [];
+  const i0 = Math.max(0, Math.floor(fromSec * SR));
+  const i1 = Math.min(samples.length, Math.floor(toSec * SR));
+  for (let i = i0; i + frame <= i1; i += frame) {
+    let sum = 0;
+    for (let k = 0; k < frame; k++) sum += samples[i + k] * samples[i + k];
+    out.push({ t: (i + frame / 2) / SR, db: db(Math.sqrt(sum / frame)) });
+  }
+  return out;
+}
+
+/** 2 ms RMS frames, as { t, db } — the resolution attacks are counted at. */
+function frames2 (samples, fromSec, toSec) {
+  const frame = Math.round(0.002 * SR);
+  const out = [];
+  const i0 = Math.max(0, Math.floor(fromSec * SR));
+  const i1 = Math.min(samples.length, Math.floor(toSec * SR));
+  for (let i = i0; i + frame <= i1; i += frame) {
+    let sum = 0;
+    for (let k = 0; k < frame; k++) sum += samples[i + k] * samples[i + k];
+    out.push({ t: (i + frame / 2) / SR, db: db(Math.sqrt(sum / frame)) });
+  }
+  return out;
+}
+
+const mean = (a) => a.reduce((x, y) => x + y, 0) / Math.max(1, a.length);
+const stddev = (a) => Math.sqrt(a.reduce((x, y) => x + (y - mean(a)) ** 2, 0) / Math.max(1, a.length));
+
 /** 10 ms RMS envelope in dB. */
 function envelope(samples, frameSec = 0.01) {
   const hop = Math.floor(frameSec * SR);
@@ -230,11 +275,29 @@ console.log(`Wrote ${OUT} (${(samples.length / SR).toFixed(2)}s @ ${SR}Hz) — p
  * ------------------------------------------------------------------------ */
 
 const REF_PRIME_MIN = 2000, REF_PRIME_MAX = 2200;      // measured 2098 Hz (R1)
+// A real register bell (R1) was measured at 0.219 s. The design holds the prime
+// longer than that — SPEC.bellPartials' 1.0x tau is 0.330 s — because R1's file
+// cuts off at 1.08 s with the bell still ringing and this alert has to stay
+// audible for the 1-2 s that was asked for. The band therefore admits the
+// designed value with slack for measurement contamination (the drawer slide's
+// energy sits in the same windows), while still rejecting a sustained tone
+// above it and a tick below it. Both directions are covered: tools/
+// alert-sound-independent-check.mjs derives its own band from the same spec.
 const REF_TAU_MIN = 0.20, REF_TAU_MAX = 0.36;          // measured 0.219 s (R1)
 const REF_BALANCE_MIN = -5, REF_BALANCE_MAX = 1;       // measured -0.1 / -4.3 dB
 const REF_CHA_CENTROID_MIN = 4500, REF_CHA_CENTROID_MAX = 7500;  // 6033 / 6219 Hz
 const REF_CHA_SPREAD_MAX = 3.5;                        // measured 1.0 / 2.7 dB
-const REF_CHA_CREST_MIN = 10, REF_CHA_CREST_MAX = 18;  // measured 12.9 / 15.9 dB
+const REF_CHA_CREST_MIN = 10, REF_CHA_CREST_MAX = 18;  // measured 12.9 / 15.9 dB (reported only now)
+// Measured on the real recording over its 0.05 s -> strike plateau, 2 ms frames.
+const REF_PLATEAU_SPREAD_MIN = 0.4, REF_PLATEAU_SPREAD_MAX = 3.0;  // measured 1.06 dB
+const REF_PLATEAU_STD_MIN = 0.8, REF_PLATEAU_STD_MAX = 3.5;        // measured 1.80 dB
+const REF_PLATEAU_LEVEL_MIN = -13;      // measured -7.2 dB; replaced build ~ -19 dB
+// Whole-alert dynamics, all measured on the real recording (docs/alert-sound.md §2):
+const REF_BODY_MIN = -13;               // measured -6.5 dB p90 RMS over 0-0.6 s
+const REF_LOUDEST_FRAME_MIN = -12;      // measured -6.3 dB loudest 25 ms RMS
+const REF_PEAK_TO_BODY_MAX = 9;         // measured 6.5 dB; replaced build 12.8 dB
+const REF_AUDIBLE40_MIN = 1.0;          // measured 1.070 s above -40 dB
+const REF_ONSET_RISE_MIN = 3;           // measured 14.7 dB; replaced build 0.2 dB
 const REF_CHA_ATTACKS_MIN = 3;                         // measured 3 / 10
 const REF_BELL_CREST_MIN = 12;                         // a struck bell is a tone
 
@@ -339,6 +402,53 @@ async function renderWith (mutate) {
   return (await off.startRendering()).getChannelData(0);
 }
 
+/* 0. the harness itself: is the graph the one that got measured? ------------
+ *
+ * Two failure modes are checked before anything about the sound is, because
+ * both would otherwise let every later check pass on a graph that is not the
+ * shipped one:
+ *   - the soft-clip curve being dropped at the VM/host realm boundary (see the
+ *     Float32Array note in loadShippedModule), which turns the master bus into
+ *     a plain gain and quietly changes every level measured below;
+ *   - the design data drifting from the builder.
+ */
+console.log('0) the harness is measuring the shipped graph');
+{
+  const probe = newContext();
+  const mod = loadShippedModule(probe);
+  const head = mod.module.exports.buildCashRegisterChime(probe, probe.destination, 0);
+  const tail = head.output;
+  check(!!tail && tail !== head,
+    'the master bus ends in the soft-clipper, not the raw gain node');
+  check(tail && tail.curve instanceof Float32Array,
+    'the soft-clip curve survived the VM/host realm boundary (web-audio-engine drops cross-realm typed arrays silently)',
+    tail && tail.curve ? `${tail.curve.length} points` : 'no curve on the master bus');
+  if (tail && tail.curve instanceof Float32Array && SPEC.softClip) {
+    const c = tail.curve;
+    const size = SPEC.softClip.curveSize;
+    check(c.length === size, 'the curve is the designed size', `${c.length} of ${size}`);
+    const mid = (c.length - 1) / 2;
+    check(Math.abs(c[Math.floor(mid)]) < 1e-6, 'the curve passes through zero (no DC offset)');
+    let monotonic = true, antisym = true, maxAbs = 0, slope0 = Infinity;
+    for (let i = 1; i < c.length; i++) if (c[i] < c[i - 1] - 1e-9) monotonic = false;
+    for (let i = 0; i <= Math.floor(mid); i++) {
+      if (Math.abs(c[c.length - 1 - i] + c[i]) > 1e-5) antisym = false;
+    }
+    for (let i = 0; i < c.length; i++) maxAbs = Math.max(maxAbs, Math.abs(c[i]));
+    slope0 = Math.abs(c[Math.floor(mid) + 1] - c[Math.floor(mid) - 1]) / (4 / (c.length - 1));
+    check(monotonic, 'the curve is monotonic (it saturates, it never folds back)');
+    check(antisym, 'the curve is antisymmetric (no even harmonics, no DC)');
+    check(Math.abs(maxAbs - SPEC.softClip.ceiling) < 1e-4,
+      'the curve cannot output more than its ceiling, so the alert cannot clip',
+      `max |y| = ${maxAbs.toFixed(4)}, ceiling ${SPEC.softClip.ceiling}`);
+    check(slope0 > 1.0,
+      'the curve lifts quiet material (that is where the loudness comes from)',
+      `slope at 0 = ${slope0.toFixed(2)}x`);
+    check(tail.oversample === SPEC.softClip.oversample,
+      'the soft-clipper oversamples as designed', `${tail.oversample}`);
+  }
+}
+
 /* 1. duration and level ---------------------------------------------------- */
 let lastAudible = 0;
 for (let i = 0; i < samples.length; i++) if (Math.abs(samples[i]) > 3e-4) lastAudible = i;
@@ -350,6 +460,54 @@ check(lastAudible / SR >= 1.0 && lastAudible / SR <= 2.1, 'lasts 1-2 seconds as 
 check(totalPeak < 0.99, 'does not clip', `peak ${(db(totalPeak)).toFixed(1)} dBFS`);
 check(totalPeak > 0.15 && totalPeak < 0.71, 'sits at a sensible alert level',
   `peak ${(db(totalPeak)).toFixed(1)} dBFS`);
+
+/* 1b. whole-alert dynamics ---------------------------------------------------
+ *
+ * These are the checks whose absence let the replaced build pass 40/40 and
+ * still sound wrong. Every one of its own criteria was a ratio measured inside
+ * a narrow window, so a sound that was 10 dB too quiet and dynamically flat
+ * satisfied all of them. Each band below is a number measured on the real
+ * recording, and each one is failed by the build this replaces.
+ *
+ *   figure                        reference   replaced build
+ *   body level (p90, 0-0.6 s)      -6.5 dB      -17.5 dB
+ *   loudest 25 ms RMS              -6.3 dB      -16.8 dB
+ *   peak minus body level           6.5 dB       12.8 dB
+ *   audible above -40 dB           1.070 s       0.790 s
+ *   first frame vs loudest frame   14.7 dB        0.2 dB
+ */
+console.log('\n1b) whole-alert dynamics (the checks the replaced build never faced)');
+const head25 = frames25(samples, 0, 0.6);
+const bodyLevel = percentile(head25.map((f) => f.db), 0.90);
+check(bodyLevel >= REF_BODY_MIN,
+  'the alert has BODY: its 90th-percentile level over the first 0.6 s is loud',
+  `${bodyLevel.toFixed(1)} dB (reference -6.5; the replaced build -17.5)`);
+
+const cha25 = frames25(samples, 0, STRIKE_AT);
+const loudestFrame = Math.max(...cha25.map((f) => f.db));
+check(loudestFrame >= REF_LOUDEST_FRAME_MIN,
+  'the "cha" reaches a real peak level, not a muted one',
+  `loudest 25 ms frame ${loudestFrame.toFixed(1)} dB (reference -6.3; replaced build -16.8)`);
+
+check(db(totalPeak) - bodyLevel <= REF_PEAK_TO_BODY_MAX,
+  'the alert is dense, not a few spikes over near-silence',
+  `peak minus body ${(db(totalPeak) - bodyLevel).toFixed(1)} dB (reference 6.5; replaced build 12.8)`);
+
+const env10 = envelope(samples, 0.010).filter((f) => f.t > 0.005);
+const audible40 = env10.filter((f) => f.db > -40);
+const audible40len = audible40.length ? audible40[audible40.length - 1].t - audible40[0].t : 0;
+check(audible40len >= REF_AUDIBLE40_MIN,
+  'the alert is genuinely audible for 1-2 seconds, not just non-silent',
+  `${audible40len.toFixed(3)} s above -40 dB (reference 1.070; replaced build 0.790)`);
+
+// A real "cha" RAMPS: the reference climbs from -21 dB in its first 25 ms to
+// -6.3 dB. The replaced build was loudest in its very first frame and then
+// decayed monotonically, so the bell arrived after the machine had already
+// wound down instead of on top of a machine still running at full weight.
+const firstFrame = cha25.length ? cha25[0].db : -140;
+check(loudestFrame - firstFrame >= REF_ONSET_RISE_MIN,
+  'the "cha" ramps up to its peak instead of starting at it and decaying',
+  `loudest frame is ${(loudestFrame - firstFrame).toFixed(1)} dB above the first (reference 14.7; replaced build 0.2)`);
 
 /* 2. the "cha": a bright, broadband, percussive mechanism ------------------ */
 console.log('\n2) the "cha" mechanism (the layer the replaced build got wrong)');
@@ -380,11 +538,41 @@ Object.entries(chaBands).forEach(([name, level]) => {
 check(chaSpread <= REF_CHA_SPREAD_MAX, 'the "cha" is broadband across low/mid/high, like a real mechanism',
   `${chaSpread.toFixed(1)} dB spread (references: 1.0 and 2.7)`);
 
+/* The "cha" must be a machine RUNNING: a steady loud plateau with a little
+ * texture on it. Measured on the real recording over 0.05 s to the strike, the
+ * 2 ms frames sit at p50 -7.2 dB and p95 -6.1 dB, i.e. p95-p50 = 1.06 dB and a
+ * standard deviation of 1.80 dB. Both failure modes fall outside that: a smooth
+ * hiss has p95-p50 and std near 0, and a row of isolated spikes has both far
+ * above 3 dB. These two numbers are ratios of levels within one window, so
+ * unlike a crest factor they do not move when the master level or the master
+ * soft-clip ceiling moves. */
+const PLATEAU_FROM = 0.05;
+const plateauDb = frames2(samples, PLATEAU_FROM, STRIKE_AT).map((f) => f.db);
+const plateauSpread = percentile(plateauDb, 0.95) - percentile(plateauDb, 0.50);
+const plateauStd = stddev(plateauDb);
+check(plateauSpread >= REF_PLATEAU_SPREAD_MIN && plateauSpread <= REF_PLATEAU_SPREAD_MAX,
+  'the "cha" runs as a mechanism: a steady plateau with texture, not a hiss and not isolated spikes',
+  `p95-p50 ${plateauSpread.toFixed(2)} dB (reference 1.06; a hiss is ~0, spikes are >3)`);
+check(plateauStd >= REF_PLATEAU_STD_MIN && plateauStd <= REF_PLATEAU_STD_MAX,
+  'the "cha" plateau varies by about as much as a real one',
+  `std ${plateauStd.toFixed(2)} dB (reference 1.80)`);
+check(percentile(plateauDb, 0.50) >= REF_PLATEAU_LEVEL_MIN,
+  'the "cha" plateau is LOUD — the single thing the replaced build got worst',
+  `p50 ${percentile(plateauDb, 0.50).toFixed(1)} dB (reference -7.2; the replaced build measured about -19)`);
+
+/* Reported, not asserted. The crest factor this replaces was peak/RMS across
+ * the whole "cha" window, banded 10-18 dB from the reference's 12.9 and 15.9.
+ * That band is unusable here and asserting it would have forced the original
+ * defect back in: the reference peaks at 0.0 dBFS because it was hard-limited
+ * in mastering, while check 1 below forbids this alert from exceeding -3 dBFS.
+ * Holding the peak 3.3 dB lower than the reference's while demanding the same
+ * crest demands an RMS 3.3 dB lower — i.e. it demands the quiet, thin "cha"
+ * that is exactly what was wrong. The plateau checks above test the same
+ * property (a mechanism, not a tone or a hiss) without depending on where the
+ * ceiling happens to sit. */
 const chaPeak = peak(samples, 0, STRIKE_AT);
 const chaCrest = db(chaPeak) - db(chaRms);
-check(chaCrest >= REF_CHA_CREST_MIN && chaCrest <= REF_CHA_CREST_MAX,
-  'the "cha" is peaky like a mechanism, neither a flat tone nor isolated spikes',
-  `crest ${chaCrest.toFixed(1)} dB (references: 12.9 and 15.9)`);
+console.log(`  info  "cha" crest (not asserted — see the comment above): ${chaCrest.toFixed(1)} dB (references 12.9 and 15.9, both measured at a 0 dBFS ceiling)`);
 const chaAttacks = countAttacks(0, STRIKE_AT);
 check(chaAttacks >= REF_CHA_ATTACKS_MIN,
   'the "cha" breaks into separate attacks, not one smooth band of noise',
@@ -446,8 +634,8 @@ const tau = -1 / (decayRate / 8.686);
 check(decayRate < -20 && decayRate > -60, 'the prime rings down like a struck bell, not a sustained tone',
   `${decayRate.toFixed(1)} dB/s`);
 check(tau >= REF_TAU_MIN && tau <= REF_TAU_MAX,
-  'the prime time constant matches the measured 0.22 s of a real register bell',
-  `tau ${tau.toFixed(3)} s`);
+  'the prime\'s time constant stays inside the struck-bell band — held longer than a real bell on purpose, so the ring carries the 1-2 s alert',
+  `tau ${tau.toFixed(3)} s (measured on a real register bell: 0.219 s; band ${REF_TAU_MIN}-${REF_TAU_MAX})`);
 
 // How long until the prime is 20 dB down: R1 needs about 1.0 s to get there,
 // which is exactly why the alert is audible for the 1-2 s that was asked for.

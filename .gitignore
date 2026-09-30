@@ -6,3 +6,9 @@ Thumbs.db
 node_modules/
 .vscode/
 .idea/
+
+# Rendered audio artifacts from tools/render-alert-sound.mjs — a build output,
+# not a source file. The shipped alert is synthesized, so nothing here is
+# committed; assets/audio/ is the only place a real recording belongs.
+alert-sound.wav
+*.render.wav
