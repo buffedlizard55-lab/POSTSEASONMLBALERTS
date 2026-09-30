@@ -2302,8 +2302,274 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
   }
 
   /**
+   * The complete "cha-ching!" cash-register alert, as data.
+   *
+   * WHAT THE SOUND IS (researched, not invented):
+   *   Every classic cash-register ring-up is three physical events layered:
+   *     1. "cha"  — the key/lever mechanism: a short burst of small mechanical
+   *                 clicks as the keys drop and the lever travels.
+   *     2. the bell — a small, hard metal bell, struck by a hammer as the
+   *                 drawer opens (the register bell was a security feature: it
+   *                 rang on every drawer open so the owner heard each sale).
+   *                 Its prime sits around 2 kHz with INHARMONIC partials and a
+   *                 long decay — that bright metallic ring is the "ching".
+   *     3. the drawer — it slides open on its rollers ("shhk") and stops with a
+   *                 low wooden/metal thud.
+   *   Sound-effect catalogues describe the same three layers ("Cash Register
+   *   Key With Bell And Drawer Opens"), and a measured reference clip of the
+   *   pop-culture ka-ching shows the bell prime at ~2.1 kHz with strong
+   *   inharmonic upper partials and a ~0.6 s ring.
+   *
+   * HOW THIS DESIGN HITS IT:
+   *   - 4 lever clicks (0-0.10s) + a low body thump          → "cha"
+   *   - drawer slide 0.115-0.40s + drawer-stop thud at 0.40s → drawer opening
+   *   - bell struck TWICE (0.165s and 0.312s) on the same bell: the second
+   *     hit is brighter and a touch softer, which is what a double-struck
+   *     register bell sounds like ("ching-ching"). Both hits share one pitch
+   *     (a detuned pair would warble), and the 0.147s gap is chosen so the
+   *     two hits add rather than cancel at the bell's partials.
+   *   - ring-out to 1.60s, tail faded to silence at 1.95s, so the whole alert
+   *     lasts about two seconds as requested.
+   *
+   * Everything is synthesized with the Web Audio API — no audio file, no
+   * network fetch, nothing to load before the alert can fire.
+   */
+  const ALERT_SOUND = {
+    // Master envelope: fade in, hold the ring, fade the tail out.
+    level: 0.21,
+    fadeIn: 0.0025,
+    holdUntil: 1.60,
+    totalLength: 1.95,
+
+    // "cha": the lever/keys. Four tight clicks, each a short band-passed noise
+    // burst, plus one low body thump under them so it reads as a mechanism
+    // rather than as static.
+    leverClicks: [
+      { at: 0.000, centre: 2600, q: 1.1, duration: 0.020, level: 0.75 },
+      { at: 0.030, centre: 1900, q: 1.3, duration: 0.016, level: 0.55 },
+      { at: 0.060, centre: 3000, q: 1.0, duration: 0.014, level: 0.42 },
+      { at: 0.090, centre: 1700, q: 1.5, duration: 0.013, level: 0.32 },
+    ],
+    leverBody: {
+      at: 0.004, tones: [150, 96], level: 0.34, tau: 0.055,
+      noiseCentre: 320, noiseQ: 0.9, noiseDuration: 0.090, noiseLevel: 0.30,
+    },
+
+    // The drawer: it rolls open (a noise band whose centre sweeps downward, so
+    // it reads as movement) and then hits its stop with a low thud.
+    drawerSlide: {
+      at: 0.115, duration: 0.285, fromCentre: 2600, toCentre: 700, q: 0.7, level: 0.42,
+    },
+    drawerStop: {
+      at: 0.400, tones: [170, 105], level: 0.20, tau: 0.050,
+      clickCentre: 800, clickQ: 1.2, clickDuration: 0.022, clickLevel: 0.09,
+    },
+
+    // The bell. 2093 Hz (C7) is the measured prime of the reference ka-ching
+    // (~2.1 kHz); the partials are deliberately inharmonic — a struck metal
+    // bell is not a harmonic series — and the higher a partial sits, the
+    // faster it dies away, which is what makes a bell sound like a bell.
+    bellFundamental: 2093,
+    bellPartials: [
+      { ratio: 0.500, gain: 0.17, tau: 1.25 },  // hum note, warms small speakers
+      { ratio: 0.972, gain: 0.52, tau: 0.95 },  // struck cluster around the prime
+      { ratio: 1.000, gain: 1.00, tau: 1.05 },  // the prime: the "ching" itself
+      { ratio: 1.013, gain: 0.44, tau: 0.88 },  // beats against the prime (shimmer)
+      { ratio: 1.300, gain: 0.30, tau: 0.60 },
+      { ratio: 1.590, gain: 0.20, tau: 0.45 },
+      { ratio: 2.190, gain: 0.36, tau: 0.38 },
+      { ratio: 2.420, gain: 0.22, tau: 0.30 },
+      { ratio: 2.830, gain: 0.14, tau: 0.24 },
+      { ratio: 3.680, gain: 0.14, tau: 0.18 },
+      { ratio: 5.500, gain: 0.07, tau: 0.13 },  // air/metallic sizzle
+    ],
+    bellStrikes: [
+      { at: 0.165, level: 0.50, bright: 1.0 },
+      // Second tap: brighter, a touch softer, 0.147s later — far enough to
+      // read as a second hit, close enough that the two hits reinforce each
+      // other's partials instead of cancelling them.
+      { at: 0.312, level: 0.45, bright: 1.6 },
+    ],
+    bellAttack: 0.003,
+    // The hammer hits the bell a moment before the tone blooms: a 9ms bright
+    // tick per strike is what gives each hit its "ching" transient.
+    hammerTick: { lead: 0.003, duration: 0.009, centre: 4500, q: 0.7, level: 0.75 },
+    // Partials are cut off a few time-constants after the strike, but the
+    // master fade has already silenced them by then.
+    tailTimeConstants: 5,
+  };
+
+  /**
+   * One short mechanical noise burst: a band-passed burst with a fast attack
+   * and an exponential decay. Used for the lever clicks, the drawer slide and
+   * the hammer tick.
+   */
+  function noiseBurst (ctx, destination, at, opts) {
+    const duration = opts.duration;
+    const frames = Math.max(1, Math.ceil(ctx.sampleRate * duration));
+    const buffer = ctx.createBuffer(1, frames, ctx.sampleRate);
+    const samples = buffer.getChannelData(0);
+    for (let i = 0; i < samples.length; i++) samples[i] = Math.random() * 2 - 1;
+
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value = opts.centre;
+    filter.Q.value = opts.q;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.0001, at);
+    gain.gain.linearRampToValueAtTime(opts.level, at + (opts.attack || 0.001));
+    gain.gain.exponentialRampToValueAtTime(0.0004, at + duration);
+    source.connect(filter);
+    filter.connect(gain);
+    gain.connect(destination);
+    source.start(at);
+    return source;
+  }
+
+  /**
+   * The drawer rolling open: band-passed noise whose centre frequency sweeps
+   * down while it plays, so the ear hears travel rather than a static hiss.
+   */
+  function drawerSlide (ctx, destination, at, spec) {
+    const frames = Math.max(1, Math.ceil(ctx.sampleRate * spec.duration));
+    const buffer = ctx.createBuffer(1, frames, ctx.sampleRate);
+    const samples = buffer.getChannelData(0);
+    let smooth = 0;
+    for (let i = 0; i < samples.length; i++) {
+      smooth = 0.55 * smooth + 0.45 * (Math.random() * 2 - 1);
+      samples[i] = smooth;
+    }
+
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.Q.value = spec.q;
+    filter.frequency.setValueAtTime(spec.fromCentre, at);
+    filter.frequency.linearRampToValueAtTime(spec.toCentre, at + spec.duration);
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.0001, at);
+    gain.gain.linearRampToValueAtTime(spec.level, at + 0.02);
+    gain.gain.linearRampToValueAtTime(spec.level * 0.8, at + spec.duration * 0.7);
+    gain.gain.linearRampToValueAtTime(0.0004, at + spec.duration);
+    source.connect(filter);
+    filter.connect(gain);
+    gain.connect(destination);
+    source.start(at);
+    return source;
+  }
+
+  /**
+   * A low mechanical thud: two short triangle tones that drop slightly in
+   * pitch (the "give" of a heavy drawer) and decay away in a few tens of ms.
+   */
+  function thump (ctx, destination, at, tones, level, tau) {
+    tones.forEach((frequency) => {
+      const osc = ctx.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(frequency * 1.35, at);
+      osc.frequency.exponentialRampToValueAtTime(frequency, at + 0.04);
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.0001, at);
+      gain.gain.linearRampToValueAtTime(level, at + 0.004);
+      gain.gain.exponentialRampToValueAtTime(0.0004, at + tau * 4);
+      osc.connect(gain);
+      gain.connect(destination);
+      osc.start(at);
+      osc.stop(at + tau * 4 + 0.02);
+    });
+  }
+
+  /**
+   * One hammer strike on the register bell: the bright tick of the hammer,
+   * then every inharmonic partial starting together and decaying at its own
+   * rate. `bright` scales the upper partials only, which is how the second
+   * tap of a double-struck bell differs from the first.
+   */
+  function bellStrike (ctx, destination, at, level, bright, spec, endAt) {
+    noiseBurst(ctx, destination, at - spec.hammerTick.lead, {
+      duration: spec.hammerTick.duration,
+      centre: spec.hammerTick.centre,
+      q: spec.hammerTick.q,
+      level: spec.hammerTick.level * level,
+      attack: 0.0008,
+    });
+
+    spec.bellPartials.forEach((partial) => {
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = spec.bellFundamental * partial.ratio;
+      const gain = ctx.createGain();
+      const peak = level * partial.gain * (partial.ratio >= 1.3 ? bright : 1);
+      const decayTo = at + spec.bellAttack + partial.tau * spec.tailTimeConstants;
+      gain.gain.setValueAtTime(0.0001, at);
+      gain.gain.linearRampToValueAtTime(peak, at + spec.bellAttack);
+      gain.gain.exponentialRampToValueAtTime(0.0004, decayTo);
+      osc.connect(gain);
+      gain.connect(destination);
+      osc.start(at);
+      // The envelope keeps its designed decay, but the oscillator is stopped
+      // once the alert is over: by then the master fade has silenced it, so
+      // nothing is left running in the background.
+      osc.stop(Math.min(decayTo, endAt) + 0.02);
+    });
+  }
+
+  /**
+   * Build the whole cha-ching cash-register alert into `destination`, starting
+   * at context time `t0`. Pure graph construction: it takes the context as an
+   * argument, so the browser path and the offline-render verification path
+   * execute exactly the same code.
+   */
+  function buildCashRegisterChime (ctx, destination, t0, spec) {
+    const sound = spec || ALERT_SOUND;
+
+    // Master envelope. Ramp-only automation (no setValueAtTime in between) so
+    // every Web Audio implementation renders the same curve.
+    const master = ctx.createGain();
+    master.gain.setValueAtTime(0.0001, t0);
+    master.gain.linearRampToValueAtTime(sound.level, t0 + sound.fadeIn);
+    master.gain.linearRampToValueAtTime(sound.level, t0 + sound.holdUntil);
+    master.gain.linearRampToValueAtTime(0, t0 + sound.totalLength);
+    master.connect(destination);
+
+    // --- "cha": keys/lever travel, then the drawer opens ---------------------
+    sound.leverClicks.forEach((click) => {
+      noiseBurst(ctx, master, t0 + click.at, click);
+    });
+    thump(ctx, master, t0 + sound.leverBody.at, sound.leverBody.tones,
+      sound.leverBody.level, sound.leverBody.tau);
+    noiseBurst(ctx, master, t0 + sound.leverBody.at, {
+      duration: sound.leverBody.noiseDuration,
+      centre: sound.leverBody.noiseCentre,
+      q: sound.leverBody.noiseQ,
+      level: sound.leverBody.noiseLevel,
+    });
+
+    drawerSlide(ctx, master, t0 + sound.drawerSlide.at, sound.drawerSlide);
+
+    // --- "ching": the register bell, struck twice ---------------------------
+    sound.bellStrikes.forEach((strike) => {
+      bellStrike(ctx, master, t0 + strike.at, strike.level, strike.bright, sound, t0 + sound.totalLength);
+    });
+
+    // --- the drawer reaches its stop ---------------------------------------
+    thump(ctx, master, t0 + sound.drawerStop.at, sound.drawerStop.tones,
+      sound.drawerStop.level, sound.drawerStop.tau);
+    noiseBurst(ctx, master, t0 + sound.drawerStop.at, {
+      duration: sound.drawerStop.clickDuration,
+      centre: sound.drawerStop.clickCentre,
+      q: sound.drawerStop.clickQ,
+      level: sound.drawerStop.clickLevel,
+    });
+
+    return master;
+  }
+
+  /**
    * Play the cha-ching cash-register alert for tracked events.
-   * This is synthesized with the Web Audio API, so it needs no external file.
    * The shared playback cooldown and alert gating are intentionally unchanged.
    */
   function playAlertSound() {
@@ -2316,9 +2582,9 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
   }
 
   /**
-   * Synthesize a short cash-register "cha-ching": two quick mechanism clicks,
-   * a pair of rising metallic bell strikes, then the drawer opening clunk.
-   * The master envelope fades to silence after 1.6 seconds, including the full bell decay.
+   * Play the alert through the live AudioContext. Everything is synthesized,
+   * so it needs no external file; the graph itself lives in
+   * buildCashRegisterChime() above.
    */
   function playCashRegisterChime() {
     try {
@@ -2327,80 +2593,11 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
       if (ctx.state === 'suspended') {
         ctx.resume().catch(() => {});
       }
-
-      const t0 = ctx.currentTime;
-      const SOUND_END = 1.6;
-      const master = ctx.createGain();
-      master.gain.setValueAtTime(0, t0);
-      master.gain.linearRampToValueAtTime(1, t0 + 0.008);
-      master.gain.setValueAtTime(1, t0 + 1.32);
-      master.gain.linearRampToValueAtTime(0, t0 + SOUND_END);
-      master.connect(ctx.destination);
-
-      // "Cha": quick key/release clicks; after the bells, the lower, longer
-      // drawer clunk completes the recognizable mechanical register sequence.
-      const clacks = [
-        { at: 0, duration: 0.045, frequency: 1450, level: 0.18 },
-        { at: 0.055, duration: 0.04, frequency: 2350, level: 0.11 },
-        { at: 0.43, duration: 0.09, frequency: 520, level: 0.28 },
-      ];
-      clacks.forEach((clack) => {
-        const sampleCount = Math.ceil(ctx.sampleRate * clack.duration);
-        const buffer = ctx.createBuffer(1, sampleCount, ctx.sampleRate);
-        const samples = buffer.getChannelData(0);
-        for (let i = 0; i < samples.length; i++) {
-          const decay = Math.exp(-i / (samples.length * 0.18));
-          samples[i] = (Math.random() * 2 - 1) * decay;
-        }
-
-        const source = ctx.createBufferSource();
-        source.buffer = buffer;
-        const filter = ctx.createBiquadFilter();
-        filter.type = 'bandpass';
-        filter.frequency.value = clack.frequency;
-        filter.Q.value = 2.2;
-        const gain = ctx.createGain();
-        const startAt = t0 + clack.at;
-        gain.gain.setValueAtTime(0, startAt);
-        gain.gain.linearRampToValueAtTime(clack.level, startAt + 0.002);
-        gain.gain.exponentialRampToValueAtTime(0.001, startAt + clack.duration);
-        source.connect(filter);
-        filter.connect(gain);
-        gain.connect(master);
-        source.start(startAt);
-        source.stop(startAt + clack.duration);
-      });
-
-      // "Ching": two struck-bell notes rising from C6 to E6. Each note uses
-      // inharmonic sine partials for a bright metallic ring, with a long decay.
-      const notes = [
-        { at: 0.16, fundamental: 1046.5, level: 0.17 }, // C6
-        { at: 0.30, fundamental: 1318.5, level: 0.13 }, // E6
-      ];
-      const partialRatios = [1, 2.01, 2.97, 4.08];
-      const partialLevels = [1, 0.42, 0.22, 0.12];
-      notes.forEach((note) => {
-        partialRatios.forEach((ratio, index) => {
-          const osc = ctx.createOscillator();
-          osc.type = 'sine';
-          osc.frequency.value = note.fundamental * ratio;
-          const gain = ctx.createGain();
-          const startAt = t0 + note.at;
-          gain.gain.setValueAtTime(0, startAt);
-          gain.gain.linearRampToValueAtTime(note.level * partialLevels[index], startAt + 0.006);
-          gain.gain.exponentialRampToValueAtTime(0.0005, t0 + 1.48);
-          gain.gain.setValueAtTime(0, t0 + 1.55);
-          osc.connect(gain);
-          gain.connect(master);
-          osc.start(startAt);
-          osc.stop(t0 + 1.56);
-        });
-      });
-
-      // Disconnect the master after its scheduled 1.6s fade has completed.
+      const master = buildCashRegisterChime(ctx, ctx.destination, ctx.currentTime);
+      // Disconnect once the scheduled tail has finished playing.
       setTimeout(() => {
         try { master.disconnect(); } catch (_) {}
-      }, 1700);
+      }, Math.round(ALERT_SOUND.totalLength * 1000) + 250);
     } catch (err) {
       console.warn('alert sound failed', err);
     }
@@ -4161,6 +4358,13 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
     setSoundEnabled(enabled) { setSoundEnabled(enabled); },
     getSoundEnabled() { return audioEnabled; },
     playAlertSound() { playAlertSound(); },
+    // The alert sound's design data and its graph builder are exposed so the
+    // offline render check (tools/render-alert-sound.mjs) can play the very
+    // same graph through a real Web Audio implementation and measure it.
+    alertSoundSpec: ALERT_SOUND,
+    buildCashRegisterChime(ctx, destination, t0, spec) {
+      return buildCashRegisterChime(ctx, destination, t0, spec);
+    },
     toggleNotify() { setNotifyEnabled(!notifyEnabled); },
     setNotifyEnabled(enabled) { setNotifyEnabled(enabled); },
     getNotifyEnabled() { return notifyEnabled; },
@@ -4254,6 +4458,9 @@ function pruneFeedLogIndex(index, keepDateStr, maxDates) {
       isReviewStatusCode, reviewStatusFlips,
       shouldAlertForReview, visibleInAllFeed,
       runsRemovableFromReview, shouldRunRiskAlert, diffRunRiskKeys,
+      // Alert sound (cha-ching cash register): design data + graph builder,
+      // exposed so the offline render check can measure the real graph.
+      ALERT_SOUND, buildCashRegisterChime,
       normalizeChallengeCounts, challengeCountIrregularities,
       teamSideInGame, teamChallengeLine, gameChallengeLine,
       // Official scoring-change tracker (pure layer)
