@@ -1,8 +1,8 @@
 # POSTSEASONMLBALERTS
 
-**Live MLB alert feed for every tracked event — manager challenges, crew-chief/umpire reviews, boundary calls, ABS pitch challenges, official-scorer pending rulings and official scoring changes — all in one complete "All" feed, with chime alerts and live tracking.**
+**Live MLB alert feed for every tracked event — manager challenges, crew-chief/umpire reviews, boundary calls, ABS pitch challenges, official-scorer pending rulings and official scoring changes — all in one complete "All" feed, with cha-ching cash-register alerts and live tracking.**
 
-A copy of [MLB-Live-PBP](https://buffedlizard55-lab.github.io/MLB-Live-PBP/reviews.html) with two intentional differences: **ABS pitch challenges are included in the "All" feed, alert system, and live tracking** (upstream excludes them from All/alerts during the regular season to limit volume), and the alert sound is a synthesized ~2-second cha-ching cash-register ring-up (key clack, gears, a drawer springing open, and a metal bell struck once) — see [`docs/alert-sound.md`](docs/alert-sound.md). Other behavior remains aligned with upstream.
+A copy of [MLB-Live-PBP](https://buffedlizard55-lab.github.io/MLB-Live-PBP/reviews.html) with two intentional differences: **ABS pitch challenges are included in the "All" feed, alert system, and live tracking** (upstream excludes them from All/alerts during the regular season to limit volume), and the alert sound is a synthesized ~1.7-second cha-ching cash-register ring-up (a bright percussive "cha" of key clacks and gear clicks over a rattling bed, a metal bell struck once for the "ching", and the drawer sliding out and thudding to a stop) — see [`docs/alert-sound.md`](docs/alert-sound.md). Other behavior remains aligned with upstream.
 
 ---
 
@@ -10,7 +10,7 @@ A copy of [MLB-Live-PBP](https://buffedlizard55-lab.github.io/MLB-Live-PBP/revie
 
 > This block is the standing source of truth for what we are building. Re-read it before every session so every change, suggestion and upgrade stays anchored to it.
 >
-> **Goal.** Copy the MLB-Live-PBP repo and site (https://buffedlizard55-lab.github.io/MLB-Live-PBP/reviews.html). The feed change is that all tracked alerts appear in the All feed, including ABS challenges that upstream excludes during the regular season. A sound customization request changed the alert audio to a synthesized cha-ching cash-register sound (researched and measured against three real register recordings: a broadband key/gear/drawer "cha" level with the bell, and a bright inharmonic ~2.1 kHz bell struck ONCE with a 0.19 s time constant, audible for ~1.6 seconds); alert categories, timing, and other behavior remain unchanged. Full record: [`docs/alert-sound.md`](docs/alert-sound.md).
+> **Goal.** Copy the MLB-Live-PBP repo and site (https://buffedlizard55-lab.github.io/MLB-Live-PBP/reviews.html). The feed change is that all tracked alerts appear in the All feed, including ABS challenges that upstream excludes during the regular season. A sound customization request changed the alert audio to a synthesized cha-ching cash-register sound. It was built by decoding two real cash-register recordings and measuring them: the "cha" is bright, broadband and full of separate attacks (spectral centroid ~6.1 kHz, flat to within ~2 dB across 150 Hz-6 kHz), the "ching" is an inharmonic bell on a 2093 Hz prime struck ONCE with a ~0.22 s time constant, and the whole alert is audible for ~1.7 seconds. Alert categories, timing, and other behavior remain unchanged. Full record: [`docs/alert-sound.md`](docs/alert-sound.md).
 >
 > **Why.** It should solve the problem of having to manually check everything ourselves — one up-to-date, current feed that shows what is happening across the whole slate without hunting.
 >
@@ -102,9 +102,9 @@ server.mjs            optional local/dev server + feed-log sync  .github/workflo
 ## Work still needed (next session) & limitations
 
 1. **Live-API verification runs in CI, not here.** `tools/smoke-test.mjs` (live checks against `statsapi.mlb.com`) could not run inside this build sandbox — outbound TLS to `statsapi.mlb.com` is blocked there (flagged, not skipped silently; the same limitation was recorded in `docs/scoring-changes.md`). All fixture-based tests pass. The live smoke is now wired into CI (`.github/workflows/smoke.yml` — every push/PR + nightly) where the network is open; treat any smoke failure as an irregularity for review.
-2. **Alert volume is the trade-off we accepted.** Including ABS means roughly 4+ extra chimes per game (MLB's own 2025 spring data: avg 4.1 challenges/game). Suggested upgrade: per-category sound toggles and/or a short coalescing window so a burst of ABS challenges raises one chime. Currently one chime per poll max + 2.5s cooldown already bounds it.
+2. **Alert volume is the trade-off we accepted.** Including ABS means roughly 4+ extra cha-chings per game (MLB's own 2025 spring data: avg 4.1 challenges/game). Suggested upgrade: per-category sound toggles and/or a short coalescing window so a burst of ABS challenges raises one alert. Currently one alert per poll max + 2.5s cooldown already bounds it.
 3. **Desktop notifications only cover run-at-risk events** (upstream design). Extending them to all alertable events (with batching, already present for run-risk) is the natural next feature.
-4. **First-load audio autoplay.** Browsers block `AudioContext` until the first user interaction; the chime is silent until one click (desktop notifications are not affected).
+4. **First-load audio autoplay.** Browsers block `AudioContext` until the first user interaction; the cha-ching is silent until one click (desktop notifications are not affected).
 5. **Feed persistence is per-browser** (`localStorage`, newest 7 dates). The optional `server.mjs` adds multi-browser sync; on static GitHub Pages, cross-device history is not shared.
 6. **Historical verification docs** (`docs/verification-report.md` etc.) describe the upstream MLB-Live-PBP baseline; the ABS-inclusion delta is recorded in `docs/abs-inclusion.md` and noted at the top of each historical doc.
 7. **Upstream API risk.** The MLB StatsAPI is public but unofficial for third-party use; field shapes and rate limits can change. The test suite is built to fail loudly on drift (see `docs/api-compliance.md`).

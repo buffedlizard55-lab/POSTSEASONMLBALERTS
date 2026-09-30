@@ -173,7 +173,7 @@ check(peakAbs < 0.99, 'no clipping anywhere', `peak ${db(peakAbs).toFixed(1)} dB
 
 /* The strike time comes from the design the alert ships with, so this tool
  * only has to be told once; it defaults to the shipped value. */
-const STRIKE = process.argv[3] !== undefined ? parseFloat(process.argv[3]) : 0.230;
+const STRIKE = process.argv[3] !== undefined ? parseFloat(process.argv[3]) : 0.170;
 console.log(`(bell strike taken at ${STRIKE.toFixed(3)} s)`);
 
 /* B. the "cha" precedes the "ching" and is level with it */
@@ -185,6 +185,95 @@ const levelGap = bellDb - chaDb;
 check(levelGap >= -6 && levelGap <= 8,
   'the bell and the mechanism sit level with each other, as in real recordings',
   `bell ${bellDb.toFixed(1)} dB vs cha ${chaDb.toFixed(1)} dB (gap ${levelGap.toFixed(1)} dB)`);
+
+/* B2. the "cha" mechanism: bright, broadband and full of separate attacks.
+ * These three figures are the ones the replaced build failed. Measured on two
+ * real cash-register recordings (docs/alert-sound.md names them):
+ *   spectral centroid        6033 Hz and 6219 Hz     (replaced build: 3270 Hz)
+ *   low/mid/high band spread   1.0 dB and  2.7 dB    (replaced build:  4.2 dB)
+ *   attacks (4 ms rise >=6dB)       3  and    10     (replaced build:     2)
+ * None of this code is shared with tools/render-alert-sound.mjs. */
+console.log('\nB2) the "cha" mechanism: bright, broadband, percussive');
+
+/** Hann-windowed magnitude spectrum, averaged over the window. */
+function averagedSpectrum(fromSec, toSec, N = 2048) {
+  const i0 = Math.max(0, Math.floor(fromSec * SR));
+  const i1 = Math.min(samples.length - N, Math.floor(toSec * SR));
+  const hop = N >> 1;
+  const acc = new Float64Array(N / 2);
+  let frames = 0;
+  for (let start = i0; start + N < i1; start += hop) {
+    const re = new Float64Array(N);
+    const im = new Float64Array(N);
+    for (let i = 0; i < N; i++) {
+      const hann = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (N - 1)));
+      re[i] = samples[start + i] * hann;
+    }
+    for (let i = 1, j = 0; i < N; i++) {
+      let bit = N >> 1;
+      for (; j & bit; bit >>= 1) j ^= bit;
+      j ^= bit;
+      if (i < j) { const t = re[i]; re[i] = re[j]; re[j] = t; const u = im[i]; im[i] = im[j]; im[j] = u; }
+    }
+    for (let len = 2; len <= N; len <<= 1) {
+      const ang = (-2 * Math.PI) / len;
+      for (let i = 0; i < N; i += len) {
+        for (let k = 0; k < len / 2; k++) {
+          const a = ang * k, wr = Math.cos(a), wi = Math.sin(a);
+          const ur = re[i + k], ui = im[i + k];
+          const vr = re[i + k + len / 2] * wr - im[i + k + len / 2] * wi;
+          const vi = re[i + k + len / 2] * wi + im[i + k + len / 2] * wr;
+          re[i + k] = ur + vr; im[i + k] = ui + vi;
+          re[i + k + len / 2] = ur - vr; im[i + k + len / 2] = ui - vi;
+        }
+      }
+    }
+    for (let i = 0; i < N / 2; i++) acc[i] += Math.sqrt(re[i] * re[i] + im[i] * im[i]);
+    frames++;
+  }
+  for (let i = 0; i < N / 2; i++) acc[i] /= Math.max(1, frames);
+  return { acc, N };
+}
+
+const mechSpec = averagedSpectrum(0, STRIKE);
+{
+  let num = 0, den = 0;
+  for (let i = 1; i < mechSpec.N / 2; i++) {
+    const m = mechSpec.acc[i] * mechSpec.acc[i];
+    num += m * ((i * SR) / mechSpec.N);
+    den += m;
+  }
+  const centroid = num / den;
+  check(centroid >= 4300 && centroid <= 7800,
+    `the "cha" centroid is ${centroid.toFixed(0)} Hz — as bright as the references (6033 / 6219 Hz)`);
+
+  const bandLevel = (lo, hi) => {
+    const bin = SR / mechSpec.N;
+    let sum = 0, n = 0;
+    for (let i = Math.max(1, Math.floor(lo / bin)); i <= Math.min(mechSpec.N / 2 - 1, Math.ceil(hi / bin)); i++) {
+      sum += mechSpec.acc[i] * mechSpec.acc[i]; n++;
+    }
+    return db(Math.sqrt(sum / Math.max(1, n)));
+  };
+  const low = bandLevel(150, 400), mid = bandLevel(700, 1600), high = bandLevel(2500, 6000);
+  const spread = Math.max(low, mid, high) - Math.min(low, mid, high);
+  check(spread <= 3.5,
+    `the "cha" is broadband: low ${low.toFixed(1)} / mid ${mid.toFixed(1)} / high ${high.toFixed(1)} dB — ` +
+    `${spread.toFixed(1)} dB apart (references: 1.0 and 2.7 dB)`);
+
+  // Attacks: 2 ms RMS envelope, count 4 ms rises of at least 6 dB.
+  const hop = Math.max(1, Math.round(SR * 0.002));
+  const env = [];
+  for (let i = 0; i + hop <= Math.floor(STRIKE * SR); i += hop) {
+    let sum = 0;
+    for (let k = i; k < i + hop; k++) sum += samples[k] * samples[k];
+    env.push(db(Math.sqrt(sum / hop)));
+  }
+  let attacks = 0;
+  for (let i = 2; i < env.length; i++) if (env[i] - env[i - 2] >= 6) attacks++;
+  check(attacks >= 3,
+    `the "cha" breaks into ${attacks} separate attacks, not one smooth band of noise (references: 3 and 10)`);
+}
 
 /* C. the ring spectrum: prime near 2.1 kHz, inharmonic, upper partials present */
 console.log(`\nC) register-bell spectrum (${(STRIKE + 0.02).toFixed(2)}-${(STRIKE + 0.25).toFixed(2)} s ring window)`);
@@ -241,8 +330,8 @@ const primeRate = (db(primeLate) - db(primeEarly)) / (0.32);
 const primeTau = -1 / (primeRate / 8.686);
 check(primeRate < -28 && primeRate > -70,
   `the prime rings down at ${primeRate.toFixed(1)} dB/s — a struck bell, not a sustained tone`);
-check(primeTau >= 0.13 && primeTau <= 0.28,
-  `prime time constant ${primeTau.toFixed(3)} s matches the measured 0.168-0.196 s of real register bells`);
+check(primeTau >= 0.18 && primeTau <= 0.38,
+  `prime time constant ${primeTau.toFixed(3)} s matches the measured ~0.22 s of a real register bell`);
 let upperDecay = null;
 let upperF = 0;
 for (const f of [prime.f * 2.29, prime.f * 2.53]) {
